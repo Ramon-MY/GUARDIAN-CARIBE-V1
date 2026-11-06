@@ -1,9 +1,10 @@
 # GUARDIÁN CARIBE-V1
 ## Proyecto académico de Gestión de Configuración de Software
 
+**Estudiante y responsable del proyecto:** Ramón Martínez  
 **Repositorio:** https://github.com/Ramon-MY/GUARDIAN-CARIBE-V1  
 **Rama principal:** `main`  
-**Responsable registrado:** Ramón Martínez  
+**Modalidad:** Proyecto individual  
 **Estado actual:** Planificación y especificación; desarrollo funcional pendiente.
 
 ---
@@ -25,18 +26,18 @@ Diseñar y desarrollar progresivamente una solución que permita registrar y con
 - Preparar una estructura inicial para código fuente, configuración, pruebas y documentación.
 - Mantener el historial de cambios mediante commits claros y verificables.
 
-## 3. Integrantes y responsabilidades
+## 3. Estudiante responsable y funciones
 
-**Integrante registrado en este repositorio:** Ramón Martínez.
+**Ramón Martínez** es el único responsable del proyecto GUARDIÁN CARIBE-V1.
 
-Responsabilidades registradas para esta etapa:
-- Análisis y documentación de requerimientos.
-- Creación y seguimiento de Issues.
-- Clasificación mediante Labels.
-- Organización del tablero de GitHub Projects.
-- Mantenimiento de la documentación y del repositorio.
-
-> Si la actividad se realiza en equipo, deben agregarse aquí los nombres reales de los demás integrantes y sus responsabilidades. No se incluyen nombres sin confirmación.
+Como autor y responsable individual, tiene a su cargo:
+- Análisis y documentación de los requerimientos funcionales.
+- Redacción de historias de usuario y criterios de aceptación.
+- Creación, clasificación y seguimiento de los Issues.
+- Administración de Labels y organización del tablero de GitHub Projects.
+- Organización del repositorio y mantenimiento de la documentación.
+- Control de versiones y registro de cambios mediante commits.
+- Planificación de la implementación y verificación progresiva de las funcionalidades.
 
 ## 4. Estado inicial del proyecto
 
@@ -69,7 +70,9 @@ No se considera que las funcionalidades estén implementadas por el solo hecho d
 
 ## 7. Organización del trabajo
 
-El trabajo se organiza en las siguientes etapas:
+Al tratarse de un proyecto individual, Ramón Martínez organiza y ejecuta las actividades de manera secuencial e incremental, utilizando GitHub para documentar, clasificar y dar seguimiento al trabajo.
+
+Las etapas son:
 
 1. **Planificación:** definir el propósito, alcance y estado inicial del proyecto.
 2. **Análisis:** identificar y redactar los requerimientos funcionales.
