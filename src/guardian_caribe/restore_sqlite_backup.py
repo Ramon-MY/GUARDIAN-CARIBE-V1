@@ -35,7 +35,6 @@ def record_restore(path: Path, backup: Path, destination: Path) -> None:
         required = {"actor_id", "action", "resource_type", "resource_id", "occurred_at"}
         if not required.issubset(columns):
             raise ValueError("Backup audit log schema is unsupported; restore was not applied")
-        fields = ["actor_id", "action", "resource_type", "resource_id", "occurred_at"]
         values = [
             None,
             "maintenance.restore",
@@ -44,15 +43,22 @@ def record_restore(path: Path, backup: Path, destination: Path) -> None:
             datetime.now(UTC).isoformat(),
         ]
         if "details_json" in columns:
-            fields.append("details_json")
-            values.append(
-                json.dumps({"backup_name": backup.name, "offline": True}, separators=(",", ":"))
+            details = json.dumps(
+                {"backup_name": backup.name, "offline": True}, separators=(",", ":")
             )
-        placeholders = ", ".join("?" for _ in fields)
-        column_list = ", ".join(fields)
-        connection.execute(
-            f"INSERT INTO audit_logs ({column_list}) VALUES ({placeholders})", values
-        )
+            connection.execute(
+                "INSERT INTO audit_logs "
+                "(actor_id, action, resource_type, resource_id, occurred_at, details_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (*values, details),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO audit_logs "
+                "(actor_id, action, resource_type, resource_id, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                values,
+            )
         connection.commit()
     finally:
         connection.close()

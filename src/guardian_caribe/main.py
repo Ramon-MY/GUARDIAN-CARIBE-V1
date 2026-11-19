@@ -644,7 +644,8 @@ def create_app() -> FastAPI:
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        assert credentials is not None
+        if credentials is None:
+            raise HTTPException(status_code=401, detail="Not authenticated")
         claims = decode_access_token(credentials.credentials, settings)
         db.add(
             RevokedToken(jti=claims["jti"], expires_at=datetime.fromtimestamp(claims["exp"], UTC))
