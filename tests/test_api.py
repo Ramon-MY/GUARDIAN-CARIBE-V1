@@ -124,3 +124,85 @@ def test_event_does_not_accept_secret_fields(client, auth_headers):
         },
     )
     assert response.status_code == 422
+
+
+def test_custom_rule_incident_notes_and_audit(client, auth_headers):
+    rule = client.post(
+        "/rules",
+        headers=auth_headers,
+        json={
+            "name": "Suspicious activity",
+            "description": "Flag suspicious activity events from endpoints.",
+            "field_name": "event_type",
+            "operator": "equals",
+            "match_value": "suspicious_activity",
+            "severity": "critical",
+        },
+    )
+    assert rule.status_code == 201
+    event = client.post(
+        "/events",
+        headers=auth_headers,
+        json={
+            "event_type": "suspicious_activity",
+            "source": "endpoint-01",
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    assert event.status_code == 201
+    alerts = client.get("/alerts", headers=auth_headers).json()
+    assert alerts[0]["rule_id"] == f"rule-{rule.json()['id']}"
+    incident = client.post(
+        "/incidents",
+        headers=auth_headers,
+        json={
+            "title": "Endpoint investigation",
+            "description": "Investigate the endpoint activity and collect evidence.",
+            "severity": "critical",
+            "alert_id": alerts[0]["id"],
+        },
+    )
+    assert incident.status_code == 201
+    incident_id = incident.json()["id"]
+    transition = client.patch(
+        f"/incidents/{incident_id}", headers=auth_headers, json={"status": "investigating"}
+    )
+    assert transition.status_code == 200
+    note = client.post(
+        f"/incidents/{incident_id}/notes",
+        headers=auth_headers,
+        json={"note": "Host isolated in lab."},
+    )
+    assert note.status_code == 201
+    details = client.get(f"/incidents/{incident_id}", headers=auth_headers)
+    assert details.json()["notes"][0]["note"] == "Host isolated in lab."
+    assert client.get("/audit", headers=auth_headers).status_code == 200
+
+
+def test_report_export_escapes_spreadsheet_formulas(client, auth_headers):
+    client.post(
+        "/events",
+        headers=auth_headers,
+        json={
+            "event_type": "process_start",
+            "source": "=SUM(1,1)",
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    response = client.get("/reports/export?dataset=events&format=csv", headers=auth_headers)
+    assert response.status_code == 200
+    assert "'=SUM(1,1)" in response.text
+
+
+def test_backup_endpoint_returns_a_consistent_sqlite_file(
+    client, auth_headers, monkeypatch, tmp_path
+):
+    from guardian_caribe.main import settings
+
+    monkeypatch.setattr(settings, "backup_directory", str(tmp_path))
+    response = client.post("/maintenance/backups", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.content.startswith(b"SQLite format 3\x00")
+    backups = client.get("/maintenance/backups", headers=auth_headers)
+    assert backups.status_code == 200
+    assert len(backups.json()) == 1

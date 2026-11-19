@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     app_name: str = "GUARDIÁN CARIBE"
     app_env: str = "development"
     database_url: str = "sqlite:///./guardian_caribe.db"
+    backup_directory: str = "./backups"
     jwt_secret: SecretStr = Field(default=SecretStr(""), alias="JWT_SECRET")
     jwt_issuer: str = "guardian-caribe"
     access_token_minutes: int = Field(default=30, ge=5, le=1440)

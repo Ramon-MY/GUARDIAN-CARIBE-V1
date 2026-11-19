@@ -1,12 +1,19 @@
+import csv
+import io
 import json
 import logging
+import sqlite3
 import threading
 import time
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import uuid4
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
@@ -16,6 +23,9 @@ from guardian_caribe.db import Base, SessionLocal, engine, get_db
 from guardian_caribe.models import (
     Alert,
     AuditLog,
+    DetectionRule,
+    Incident,
+    IncidentNote,
     Indicator,
     RevokedToken,
     SecurityEvent,
@@ -25,8 +35,16 @@ from guardian_caribe.models import (
 from guardian_caribe.schemas import (
     AlertRead,
     AlertUpdate,
+    DetectionRuleCreate,
+    DetectionRuleRead,
+    DetectionRuleUpdate,
     EventCreate,
     EventRead,
+    IncidentCreate,
+    IncidentNoteCreate,
+    IncidentNoteRead,
+    IncidentRead,
+    IncidentUpdate,
     IndicatorCreate,
     IndicatorRead,
     LoginRequest,
@@ -60,6 +78,7 @@ class LocalRateLimiter:
         self.limit = limit
         self.requests: dict[str, deque[float]] = defaultdict(deque)
         self.lock = threading.Lock()
+        self.denials = 0
 
     def allow(self, key: str) -> bool:
         now = time.monotonic()
@@ -73,11 +92,13 @@ class LocalRateLimiter:
                 for stale_key in stale_keys:
                     del self.requests[stale_key]
                 if len(self.requests) >= 10_000:
+                    self.denials += 1
                     return False
             bucket = self.requests[key]
             while bucket and bucket[0] <= now - 60:
                 bucket.popleft()
             if len(bucket) >= self.limit:
+                self.denials += 1
                 return False
             bucket.append(now)
             return True
@@ -87,19 +108,6 @@ rate_limiter = LocalRateLimiter(settings.rate_limit_per_minute)
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(
-        title=settings.app_name,
-        version="0.1.0",
-        description=(
-            "Prototipo defensivo de ingestión de telemetría, correlación de IoC "
-            "y gestión de alertas."
-        ),
-        docs_url="/docs" if settings.app_env.lower() != "production" else None,
-        redoc_url=None,
-        openapi_url="/openapi.json" if settings.app_env.lower() != "production" else None,
-    )
-
-    @app.on_event("startup")
     def initialize() -> None:
         settings.validate_runtime()
         Base.metadata.create_all(bind=engine)
@@ -133,10 +141,32 @@ def create_app() -> FastAPI:
                     "BOOTSTRAP_ADMIN_PASSWORD for the first startup."
                 )
 
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        initialize()
+        yield
+
+    app = FastAPI(
+        title=settings.app_name,
+        version="0.1.0",
+        description=(
+            "Prototipo defensivo de ingestión de telemetría, correlación de IoC "
+            "y gestión de alertas."
+        ),
+        docs_url="/docs" if settings.app_env.lower() != "production" else None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if settings.app_env.lower() != "production" else None,
+        lifespan=lifespan,
+    )
+
     @app.middleware("http")
     async def enforce_rate_limit(request: Request, call_next):
+        request_id = uuid4().hex
+        request.state.request_id = request_id
         if request.url.path == "/health":
-            return await call_next(request)
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = request_id
+            return response
         key = request.client.host if request.client else "unknown"
         if not rate_limiter.allow(key):
             return Response(
@@ -145,7 +175,23 @@ def create_app() -> FastAPI:
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Request-ID"] = request_id
         return response
+
+    @app.exception_handler(Exception)
+    async def unexpected_error(request: Request, exc: Exception):
+        request_id = getattr(request.state, "request_id", "unavailable")
+        logger.error(
+            "Unhandled application error type=%s request_id=%s path=%s",
+            type(exc).__name__,
+            request_id,
+            request.url.path,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error", "request_id": request_id},
+            headers={"X-Request-ID": request_id, "Cache-Control": "no-store"},
+        )
 
     def audit(
         db: Session,
@@ -278,6 +324,33 @@ def create_app() -> FastAPI:
                     "Known malicious file hash observed",
                     "Event file hash matched an active threat-intelligence indicator.",
                     "critical",
+                )
+
+        for rule in db.scalars(select(DetectionRule).where(DetectionRule.enabled.is_(True))):
+            observed = getattr(event, rule.field_name, None)
+            if observed is None:
+                continue
+            matched = (
+                str(observed).lower() == rule.match_value.lower()
+                if rule.operator == "equals"
+                else rule.match_value.lower() in str(observed).lower()
+            )
+            rule_key = f"rule-{rule.id}"
+            if (
+                matched
+                and db.scalar(
+                    select(Alert.id).where(Alert.event_id == event.id, Alert.rule_id == rule_key)
+                )
+                is None
+            ):
+                db.add(
+                    Alert(
+                        title=rule.name,
+                        description=f"{rule.description} (event #{event.id})",
+                        severity=rule.severity,
+                        rule_id=rule_key,
+                        event_id=event.id,
+                    )
                 )
 
         if event.event_type == "login_failed" and event.source_ip:
@@ -548,6 +621,411 @@ def create_app() -> FastAPI:
         db.refresh(alert)
         return alert
 
+    @app.get("/alerts/{alert_id}", tags=["alerts"])
+    def get_alert(
+        alert_id: int,
+        _user: User = Depends(require_roles("admin", "analyst", "viewer")),
+        db: Session = Depends(get_db),
+    ):
+        alert = db.get(Alert, alert_id)
+        if alert is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        event_data = serialize_event(alert.event) if alert.event else None
+        indicator = db.get(Indicator, alert.indicator_id) if alert.indicator_id else None
+        return {
+            "id": alert.id,
+            "title": alert.title,
+            "description": alert.description,
+            "severity": alert.severity,
+            "status": alert.status,
+            "rule_id": alert.rule_id,
+            "event": event_data,
+            "indicator": IndicatorRead.model_validate(indicator) if indicator else None,
+            "assigned_to_id": alert.assigned_to_id,
+            "created_at": _ensure_aware(alert.created_at),
+            "updated_at": _ensure_aware(alert.updated_at),
+        }
+
+    @app.post("/rules", response_model=DetectionRuleRead, status_code=201, tags=["detections"])
+    def create_rule(
+        payload: DetectionRuleCreate,
+        user: User = Depends(require_roles("admin")),
+        db: Session = Depends(get_db),
+    ):
+        if (
+            db.scalar(select(DetectionRule.id).where(DetectionRule.name == payload.name))
+            is not None
+        ):
+            raise HTTPException(status_code=409, detail="Rule name already exists")
+        rule = DetectionRule(**payload.model_dump(), created_by_id=user.id)
+        db.add(rule)
+        db.flush()
+        audit(db, user.id, "detection_rule.create", "detection_rule", rule.id)
+        db.commit()
+        db.refresh(rule)
+        return rule
+
+    @app.get("/rules", response_model=list[DetectionRuleRead], tags=["detections"])
+    def list_rules(
+        enabled: bool | None = None,
+        _user: User = Depends(require_roles("admin", "analyst", "viewer")),
+        db: Session = Depends(get_db),
+    ):
+        query = select(DetectionRule).order_by(DetectionRule.id)
+        if enabled is not None:
+            query = query.where(DetectionRule.enabled.is_(enabled))
+        return db.scalars(query).all()
+
+    @app.patch("/rules/{rule_id}", response_model=DetectionRuleRead, tags=["detections"])
+    def update_rule(
+        rule_id: int,
+        payload: DetectionRuleUpdate,
+        user: User = Depends(require_roles("admin")),
+        db: Session = Depends(get_db),
+    ):
+        rule = db.get(DetectionRule, rule_id)
+        if rule is None:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        for field, value in payload.model_dump(exclude_unset=True).items():
+            setattr(rule, field, value)
+        rule.updated_at = utcnow()
+        audit(db, user.id, "detection_rule.update", "detection_rule", rule.id)
+        db.commit()
+        db.refresh(rule)
+        return rule
+
+    @app.post("/incidents", response_model=IncidentRead, status_code=201, tags=["incidents"])
+    def create_incident(
+        payload: IncidentCreate,
+        user: User = Depends(require_roles("admin", "analyst")),
+        db: Session = Depends(get_db),
+    ):
+        if payload.alert_id is not None:
+            alert = db.get(Alert, payload.alert_id)
+            if alert is None:
+                raise HTTPException(status_code=404, detail="Alert not found")
+            if (
+                db.scalar(select(Incident.id).where(Incident.alert_id == payload.alert_id))
+                is not None
+            ):
+                raise HTTPException(status_code=409, detail="Alert already belongs to an incident")
+        incident = Incident(**payload.model_dump(), created_by_id=user.id)
+        db.add(incident)
+        db.flush()
+        audit(db, user.id, "incident.create", "incident", incident.id)
+        db.commit()
+        db.refresh(incident)
+        return incident
+
+    @app.get("/incidents", response_model=list[IncidentRead], tags=["incidents"])
+    def list_incidents(
+        incident_status: str | None = Query(default=None, alias="status"),
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        _user: User = Depends(require_roles("admin", "analyst", "viewer")),
+        db: Session = Depends(get_db),
+    ):
+        query = select(Incident).order_by(Incident.created_at.desc(), Incident.id.desc())
+        if incident_status is not None:
+            if incident_status not in {"open", "investigating", "contained", "resolved", "closed"}:
+                raise HTTPException(status_code=422, detail="Invalid incident status")
+            query = query.where(Incident.status == incident_status)
+        return db.scalars(query.limit(limit).offset(offset)).all()
+
+    @app.get("/incidents/{incident_id}", tags=["incidents"])
+    def get_incident(
+        incident_id: int,
+        _user: User = Depends(require_roles("admin", "analyst", "viewer")),
+        db: Session = Depends(get_db),
+    ):
+        incident = db.get(Incident, incident_id)
+        if incident is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        notes = db.execute(
+            select(IncidentNote, User.username)
+            .join(User, User.id == IncidentNote.author_id)
+            .where(IncidentNote.incident_id == incident_id)
+            .order_by(IncidentNote.created_at, IncidentNote.id)
+        ).all()
+        return {
+            **IncidentRead.model_validate(incident).model_dump(),
+            "notes": [
+                {
+                    "id": note.id,
+                    "incident_id": note.incident_id,
+                    "author_id": note.author_id,
+                    "author_username": username,
+                    "note": note.note,
+                    "created_at": _ensure_aware(note.created_at),
+                }
+                for note, username in notes
+            ],
+        }
+
+    @app.patch("/incidents/{incident_id}", response_model=IncidentRead, tags=["incidents"])
+    def update_incident(
+        incident_id: int,
+        payload: IncidentUpdate,
+        user: User = Depends(require_roles("admin", "analyst")),
+        db: Session = Depends(get_db),
+    ):
+        incident = db.get(Incident, incident_id)
+        if incident is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        changes = payload.model_dump(exclude_unset=True)
+        new_status = changes.get("status")
+        allowed = {
+            "open": {"investigating", "contained", "resolved", "closed"},
+            "investigating": {"contained", "resolved", "closed"},
+            "contained": {"investigating", "resolved", "closed"},
+            "resolved": {"investigating", "closed"},
+            "closed": set(),
+        }
+        if (
+            new_status is not None
+            and new_status != incident.status
+            and new_status not in allowed[incident.status]
+        ):
+            raise HTTPException(status_code=409, detail="Invalid incident status transition")
+        if "assigned_to_id" in changes and changes["assigned_to_id"] is not None:
+            assignee = db.get(User, changes["assigned_to_id"])
+            if assignee is None or not assignee.is_active:
+                raise HTTPException(status_code=422, detail="Assignee must be an active user")
+        for field, value in changes.items():
+            setattr(incident, field, value)
+        incident.updated_at = utcnow()
+        audit(db, user.id, "incident.update", "incident", incident.id)
+        db.commit()
+        db.refresh(incident)
+        return incident
+
+    @app.post(
+        "/incidents/{incident_id}/notes",
+        response_model=IncidentNoteRead,
+        status_code=201,
+        tags=["incidents"],
+    )
+    def add_incident_note(
+        incident_id: int,
+        payload: IncidentNoteCreate,
+        user: User = Depends(require_roles("admin", "analyst")),
+        db: Session = Depends(get_db),
+    ):
+        if db.get(Incident, incident_id) is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        note = IncidentNote(incident_id=incident_id, author_id=user.id, note=payload.note)
+        db.add(note)
+        db.flush()
+        audit(db, user.id, "incident.note.create", "incident", incident_id)
+        db.commit()
+        db.refresh(note)
+        return {
+            "id": note.id,
+            "incident_id": incident_id,
+            "author_id": user.id,
+            "author_username": user.username,
+            "note": note.note,
+            "created_at": _ensure_aware(note.created_at),
+        }
+
+    @app.get("/audit", tags=["administration"])
+    def list_audit(
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        _user: User = Depends(require_roles("admin")),
+        db: Session = Depends(get_db),
+    ):
+        entries = db.scalars(
+            select(AuditLog)
+            .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return [
+            {
+                "id": entry.id,
+                "actor_id": entry.actor_id,
+                "action": entry.action,
+                "resource_type": entry.resource_type,
+                "resource_id": entry.resource_id,
+                "occurred_at": _ensure_aware(entry.occurred_at),
+            }
+            for entry in entries
+        ]
+
+    @app.get("/system/config", tags=["administration"])
+    def read_safe_configuration(_user: User = Depends(require_roles("admin"))):
+        return {
+            "app_name": settings.app_name,
+            "app_env": settings.app_env,
+            "database_type": "sqlite"
+            if settings.database_url.startswith("sqlite:")
+            else "postgresql",
+            "access_token_minutes": settings.access_token_minutes,
+            "max_login_attempts": settings.max_login_attempts,
+            "login_lock_minutes": settings.login_lock_minutes,
+            "brute_force_window_minutes": settings.brute_force_window_minutes,
+            "brute_force_threshold": settings.brute_force_threshold,
+            "rate_limit_per_minute": settings.rate_limit_per_minute,
+        }
+
+    @app.get("/maintenance/backups", tags=["maintenance"])
+    def list_backups(_user: User = Depends(require_roles("admin"))):
+        if engine.url.get_backend_name() != "sqlite":
+            raise HTTPException(status_code=501, detail="Backup API currently supports SQLite only")
+        backup_dir = Path(settings.backup_directory).resolve()
+        if not backup_dir.exists():
+            return []
+        return [
+            {
+                "backup_id": path.stem.removeprefix("guardian-"),
+                "size_bytes": path.stat().st_size,
+                "created_at": datetime.fromtimestamp(path.stat().st_mtime, UTC),
+            }
+            for path in sorted(
+                backup_dir.glob("guardian-*.sqlite3"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+        ]
+
+    @app.post("/maintenance/backups", tags=["maintenance"])
+    def create_backup(user: User = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+        if engine.url.get_backend_name() != "sqlite" or engine.url.database in {None, ":memory:"}:
+            raise HTTPException(
+                status_code=501, detail="Backup API currently supports file-based SQLite only"
+            )
+        backup_dir = Path(settings.backup_directory).resolve()
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_id = uuid4().hex
+        target = backup_dir / f"guardian-{backup_id}.sqlite3"
+        audit(db, user.id, "backup.create", "backup", backup_id)
+        db.commit()
+        source_connection = engine.raw_connection()
+        destination = sqlite3.connect(target)
+        try:
+            source_connection.driver_connection.backup(destination)
+            result = destination.execute("PRAGMA integrity_check").fetchone()
+            if result is None or result[0] != "ok":
+                target.unlink(missing_ok=True)
+                raise HTTPException(status_code=500, detail="SQLite backup integrity check failed")
+        finally:
+            destination.close()
+            source_connection.close()
+        return FileResponse(
+            target,
+            media_type="application/vnd.sqlite3",
+            filename=target.name,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/reports/summary", tags=["reports"])
+    def report_summary(
+        days: int = Query(default=30, ge=1, le=365),
+        _user: User = Depends(require_roles("admin", "analyst", "viewer")),
+        db: Session = Depends(get_db),
+    ):
+        since = utcnow() - timedelta(days=days)
+        events = (
+            db.scalar(
+                select(func.count(SecurityEvent.id)).where(SecurityEvent.received_at >= since)
+            )
+            or 0
+        )
+        alerts = db.scalar(select(func.count(Alert.id)).where(Alert.created_at >= since)) or 0
+        incidents = (
+            db.scalar(select(func.count(Incident.id)).where(Incident.created_at >= since)) or 0
+        )
+        severity_counts = db.execute(
+            select(Alert.severity, func.count(Alert.id))
+            .where(Alert.created_at >= since)
+            .group_by(Alert.severity)
+        ).all()
+        return {
+            "period_days": days,
+            "events_received": events,
+            "alerts_created": alerts,
+            "incidents_created": incidents,
+            "alerts_by_severity": {severity: count for severity, count in severity_counts},
+        }
+
+    @app.get("/reports/export", tags=["reports"])
+    def export_report(
+        dataset: str = Query(pattern="^(events|alerts|incidents)$"),
+        format: str = Query(default="csv", pattern="^(csv|json)$"),
+        limit: int = Query(default=1000, ge=1, le=5000),
+        _user: User = Depends(require_roles("admin", "analyst", "viewer")),
+        db: Session = Depends(get_db),
+    ):
+        if dataset == "events":
+            items = [
+                serialize_event(item)
+                for item in db.scalars(
+                    select(SecurityEvent).order_by(SecurityEvent.id.desc()).limit(limit)
+                ).all()
+            ]
+        elif dataset == "alerts":
+            items = [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "description": item.description,
+                    "severity": item.severity,
+                    "status": item.status,
+                    "rule_id": item.rule_id,
+                    "event_id": item.event_id,
+                    "indicator_id": item.indicator_id,
+                    "created_at": _ensure_aware(item.created_at),
+                }
+                for item in db.scalars(select(Alert).order_by(Alert.id.desc()).limit(limit)).all()
+            ]
+        else:
+            items = [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "description": item.description,
+                    "severity": item.severity,
+                    "status": item.status,
+                    "alert_id": item.alert_id,
+                    "assigned_to_id": item.assigned_to_id,
+                    "created_at": _ensure_aware(item.created_at),
+                }
+                for item in db.scalars(
+                    select(Incident).order_by(Incident.id.desc()).limit(limit)
+                ).all()
+            ]
+        normalized = [
+            {
+                key: value.isoformat() if isinstance(value, datetime) else value
+                for key, value in item.items()
+            }
+            for item in items
+        ]
+        if format == "json":
+            return normalized
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=list(normalized[0]) if normalized else ["id"])
+        writer.writeheader()
+        for item in normalized:
+            writer.writerow(
+                {
+                    key: (
+                        "'" + value
+                        if isinstance(value, str)
+                        and value.lstrip().startswith(("=", "+", "-", "@"))
+                        else value
+                    )
+                    for key, value in item.items()
+                }
+            )
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename=guardian-{dataset}.csv"},
+        )
+
     @app.get("/analytics/summary", tags=["analytics"])
     def analytics_summary(
         _user: User = Depends(require_roles("admin", "analyst", "viewer")),
@@ -573,6 +1051,7 @@ def create_app() -> FastAPI:
             "events_received": event_count,
             "active_alerts": active_alert_count,
             "active_alerts_by_severity": {severity: count for severity, count in by_severity},
+            "rate_limit_denials_since_process_start": rate_limiter.denials,
         }
 
     return app

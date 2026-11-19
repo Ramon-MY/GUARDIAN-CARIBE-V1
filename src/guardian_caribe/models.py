@@ -85,6 +85,55 @@ class Alert(Base):
     event: Mapped[SecurityEvent | None] = relationship()
 
 
+class DetectionRule(Base):
+    __tablename__ = "detection_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    description: Mapped[str] = mapped_column(Text)
+    field_name: Mapped[str] = mapped_column(String(32))
+    operator: Mapped[str] = mapped_column(String(16))
+    match_value: Mapped[str] = mapped_column(String(256))
+    severity: Mapped[str] = mapped_column(String(16))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class Incident(Base):
+    __tablename__ = "incidents"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text)
+    severity: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    alert_id: Mapped[int | None] = mapped_column(
+        ForeignKey("alerts.id"), unique=True, nullable=True
+    )
+    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    assigned_to_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class IncidentNote(Base):
+    __tablename__ = "incident_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    incident_id: Mapped[int] = mapped_column(ForeignKey("incidents.id"), index=True)
+    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    note: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

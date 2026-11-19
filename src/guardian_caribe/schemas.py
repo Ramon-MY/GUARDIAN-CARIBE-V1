@@ -185,3 +185,81 @@ class AlertRead(BaseModel):
 class AlertUpdate(BaseModel):
     status: Literal["new", "investigating", "escalated", "closed"] | None = None
     assigned_to_id: int | None = None
+
+
+class DetectionRuleCreate(BaseModel):
+    name: str = Field(min_length=3, max_length=128)
+    description: str = Field(min_length=8, max_length=1000)
+    field_name: Literal[
+        "event_type", "source", "severity", "source_ip", "destination_ip", "domain", "file_hash"
+    ]
+    operator: Literal["equals", "contains"] = "equals"
+    match_value: str = Field(min_length=1, max_length=256)
+    severity: Literal["low", "medium", "high", "critical"] = "medium"
+
+    @field_validator("name", "match_value")
+    @classmethod
+    def strip_value(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Value cannot be empty")
+        return value
+
+
+class DetectionRuleUpdate(BaseModel):
+    enabled: bool | None = None
+    description: str | None = Field(default=None, min_length=8, max_length=1000)
+    severity: Literal["low", "medium", "high", "critical"] | None = None
+
+
+class DetectionRuleRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    description: str
+    field_name: str
+    operator: str
+    match_value: str
+    severity: str
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class IncidentCreate(BaseModel):
+    title: str = Field(min_length=3, max_length=200)
+    description: str = Field(min_length=8, max_length=4000)
+    severity: Literal["low", "medium", "high", "critical"]
+    alert_id: int | None = None
+
+
+class IncidentUpdate(BaseModel):
+    status: Literal["open", "investigating", "contained", "resolved", "closed"] | None = None
+    assigned_to_id: int | None = None
+
+
+class IncidentNoteCreate(BaseModel):
+    note: str = Field(min_length=1, max_length=4000)
+
+
+class IncidentNoteRead(BaseModel):
+    id: int
+    incident_id: int
+    author_id: int
+    author_username: str
+    note: str
+    created_at: datetime
+
+
+class IncidentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    title: str
+    description: str
+    severity: str
+    status: str
+    alert_id: int | None
+    created_by_id: int
+    assigned_to_id: int | None
+    created_at: datetime
+    updated_at: datetime

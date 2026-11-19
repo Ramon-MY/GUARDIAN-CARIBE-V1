@@ -17,8 +17,11 @@ Prototipo académico de una API XDR ligera para registrar telemetría de segurid
 - Consulta paginada de eventos con filtros por tipo, severidad, IP y rango temporal.
 - Indicadores IP, dominio y hash con fuente, confianza y fecha de expiración. No se incluye una lista inventada de IoC ni se afirma que el prototipo consuma feeds externos.
 - Correlación exacta contra IoC y alerta por repetición de fallos de autenticación.
-- Gestión de estado y asignación de alertas, resumen de actividad y registro de auditoría.
+- Reglas configurables de detección exacta/contiene por administradores.
+- Gestión de alertas e incidentes, transiciones de estado, asignación y notas de investigación.
+- Resumen de actividad, exportación CSV/JSON de reportes y consulta administrativa de auditoría.
 - Límite de solicitudes por IP para instancia única.
+- Copia SQLite con verificación y restauración offline que exige confirmación explícita.
 
 ## Arranque local
 
@@ -51,6 +54,10 @@ Todas las rutas salvo `GET /health` y `POST /auth/login` requieren `Authorizatio
 | `GET/POST /indicators` | Consulta autenticada / admin | Mantener inteligencia de amenazas con procedencia |
 | `GET /alerts`, `PATCH /alerts/{id}` | Consulta autenticada / admin, analyst | Revisar, asignar y actualizar alertas |
 | `GET /analytics/summary` | Usuario autenticado | Métricas de las últimas 24 horas |
+| `/rules`, `/incidents`, `/incidents/{id}/notes` | Admin / admin, analyst | Reglas, seguimiento y bitácora de investigación |
+| `GET /audit`, `GET /system/config` | Admin | Auditoría y configuración sin secretos |
+| `GET /reports/summary`, `GET /reports/export` | Usuario autenticado | Resumen y exportación CSV/JSON limitada |
+| `GET/POST /maintenance/backups` | Admin | Listar o descargar una copia de SQLite |
 
 Ejemplo de evento:
 
@@ -84,12 +91,13 @@ Las pruebas cubren autenticación, roles, revocación, validación, ingestión, 
 - La expiración JWT no sustituye TLS; no publiques el servicio directamente a Internet.
 - El prototipo no trae conectores de agentes/EDR, feeds comerciales, aislamiento de endpoints, respuesta automatizada, MFA ni una interfaz web.
 - Las reglas de detección son deliberadamente pequeñas y explícitas. Requieren ajuste con datos autorizados para reducir falsos positivos.
+- La copia API solo funciona con SQLite en archivo local. Para restaurar, detén el servicio y usa el script local con la ruta de destino comprobada y `--confirm-replace`.
 - Antes de producción hacen falta migraciones versionadas, PostgreSQL, gestión de secretos, TLS, protección CSRF si se añade sesión de navegador, política de retención, revisión de privacidad, copias cifradas y ejercicios de restauración.
 - Configurar `APP_ENV=production` hace que el servicio se niegue a iniciar mientras no existan migraciones y controles operativos; esta versión no admite despliegue de producción.
 
 ## Requerimientos y estado
 
-El catálogo de [35 requerimientos](documentacion/requerimientos.md) describe el objetivo completo. Esta entrega implementa un corte vertical verificable de autenticación/usuarios, ingesta/consulta, IoC, alertas, auditoría y configuración básica. Gestión de incidentes, notas, exportación, restauración y conectores permanecen pendientes; los Issues no se consideran completados por existir código relacionado.
+El catálogo de [35 requerimientos](documentacion/requerimientos.md) describe el objetivo completo. Esta entrega implementa un corte vertical verificable de autenticación/usuarios, ingesta/consulta, IoC, reglas, alertas, incidentes, notas, auditoría, reportes, copias SQLite y configuración básica. Conectores y despliegue real permanecen pendientes; los Issues no se consideran completados por existir código relacionado.
 
 ## Proyecto
 
