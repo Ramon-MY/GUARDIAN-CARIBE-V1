@@ -5,7 +5,7 @@ namespace GuardianCaribe.Desktop.Forms;
 
 public sealed class LoginForm : Form
 {
-    private readonly AuthenticationService auth = new();
+    private AuthSession? session;
     private readonly Panel leftPanel = new();
     private readonly Panel rightPanel = new();
     private readonly Panel loginCard = new();
@@ -130,7 +130,7 @@ public sealed class LoginForm : Form
         btnLogin.FlatAppearance.BorderSize = 0;
         btnLogin.Font = AppTheme.Font(11, FontStyle.Bold);
         btnLogin.Cursor = Cursors.Hand;
-        btnLogin.Click += Login;
+        btnLogin.Click += LoginAsync;
 
         lblMessage.Location = new Point(0, 417);
         lblMessage.Size = new Size(390, 58);
@@ -166,13 +166,43 @@ public sealed class LoginForm : Form
         box.MaxLength = 128;
     }
 
-    private void Login(object? sender, EventArgs e)
+    private async void LoginAsync(object? sender, EventArgs e)
     {
-        LoginResult result = auth.ValidateLogin(
-            txtUsername.Text.Trim(), txtPassword.Text);
-        lblMessage.ForeColor = AppTheme.Error;
-        lblMessage.Text = result.Message;
-        // No se permite el acceso hasta implementar autenticación real.
+        btnLogin.Enabled = false;
+        btnLogin.Text = "CONECTANDO…";
+        lblMessage.ForeColor = AppTheme.Muted;
+        lblMessage.Text = "Conectando con el servicio de autenticación…";
+
+        try
+        {
+            LoginResult result = await new AuthenticationService()
+                .LoginAsync(txtUsername.Text, txtPassword.Text);
+            session = result.Session;
+            lblMessage.ForeColor = result.Success ? AppTheme.Accent : AppTheme.Error;
+            lblMessage.Text = result.Message;
+            txtPassword.Clear();
+
+            if (session is not null)
+            {
+                txtUsername.Enabled = false;
+                txtPassword.Enabled = false;
+                chkShowPassword.Enabled = false;
+                btnLogin.Text = "SESIÓN INICIADA";
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            lblMessage.ForeColor = AppTheme.Error;
+            lblMessage.Text = ex.Message;
+        }
+        finally
+        {
+            if (session is null)
+            {
+                btnLogin.Enabled = true;
+                btnLogin.Text = "INICIAR SESIÓN";
+            }
+        }
     }
 
     private void UpdateLayout()

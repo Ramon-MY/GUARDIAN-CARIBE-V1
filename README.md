@@ -7,6 +7,8 @@
 **Modalidad:** Proyecto individual  
 **Estado actual:** Planificación y especificación; desarrollo funcional pendiente.
 
+> **Actualización de desarrollo:** la rama `feature/rf01-login-winforms` contiene un cliente de escritorio WinForms inicial. El formulario de acceso ya consume `POST /auth/login` del backend prototipo cuando este se ejecuta; esta rama no incluye ni despliega el backend. El token se conserva solo en memoria. La solución compila, pero el flujo de usuario y las pantallas protegidas aún requieren integración.
+
 ---
 
 ## 1. Descripción del proyecto
@@ -127,6 +129,23 @@ Cada modificación relevante debe quedar registrada en el historial de commits. 
 ## 11. Estado de la entrega documental
 
 La línea base documental contempla el repositorio, el README, el catálogo de 35 requerimientos, los Issues, las Labels y el tablero de seguimiento. Las capturas de evidencias deben mostrar cada uno de estos elementos de forma legible y verificable.
+
+## 12. Aplicación de escritorio (rama de desarrollo)
+
+- Abrir `GuardianCaribe.sln` en Visual Studio Community.
+- Proyecto: `src/GuardianCaribe.Desktop/GuardianCaribe.Desktop.csproj` (`net8.0-windows`).
+- API por defecto: `http://127.0.0.1:8000` (solo loopback para desarrollo).
+- Para otro servidor, definir `GUARDIAN_CARIBE_API_URL`; el cliente exige HTTPS para destinos remotos.
+- La API debe estar activa y tener un usuario habilitado. Nunca guardar contraseñas o claves en el repositorio.
+- El prototipo del backend se encuentra actualmente en la rama `feat/prototipo-xdr-mvp`; integrar el cliente con un backend desplegado requiere primero publicar o ejecutar esa API.
+
+Compilar desde PowerShell:
+
+```powershell
+dotnet build .\GuardianCaribe.sln
+```
+
+El cliente aún no consume endpoints protegidos ni presenta el panel de monitoreo. No se deben considerar RF-01 ni el producto completo listos para producción hasta integrar una sesión autenticada, cierre de sesión, autorización y validaciones de extremo a extremo.
 
 ---
 **GUARDIÁN CARIBE-V1 — Gestión de Configuración de Software**
