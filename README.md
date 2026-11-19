@@ -1,132 +1,99 @@
 # GUARDIÁN CARIBE-V1
-## Proyecto académico de Gestión de Configuración de Software
 
-**Estudiante y responsable del proyecto:** Ramón Martínez  
-**Repositorio:** https://github.com/Ramon-MY/GUARDIAN-CARIBE-V1  
-**Rama principal:** `main`  
-**Modalidad:** Proyecto individual  
-**Estado actual:** Planificación y especificación; desarrollo funcional pendiente.
+Prototipo académico de una API XDR ligera para registrar telemetría de seguridad, correlacionar indicadores de amenaza y gestionar alertas. El diseño prioriza despliegues pequeños y permite añadir fuentes de inteligencia locales con procedencia y caducidad.
 
----
+**Estado:** primera versión funcional del backend; no es una plataforma XDR de producción.
 
-## 1. Descripción del proyecto
+**Responsable del proyecto:** Ramón Martínez.
+**Stack:** Python 3.11+, FastAPI, SQLAlchemy, Pydantic, SQLite para desarrollo, PostgreSQL previsto para despliegue.
 
-GUARDIÁN CARIBE-V1 es una propuesta de plataforma ligera para el monitoreo de eventos, la detección de comportamientos sospechosos y el apoyo a la respuesta ante incidentes de ciberseguridad. Se plantea para organizaciones y entornos con recursos tecnológicos o conectividad limitados, con atención al contexto del Caribe y Latinoamérica.
+## Funciones implementadas
 
-## 2. Objetivo general
+- Cuentas con roles `admin`, `analyst` y `viewer`; contraseñas Argon2id.
+- JWT de acceso con expiración, emisor, identificador revocable y logout efectivo.
+- Bloqueo temporal por intentos fallidos y mensajes de autenticación genéricos.
+- Alta, desactivación y consulta de usuarios por administradores.
+- Ingestión validada de eventos; normaliza IP, dominio, hash y hora UTC.
+- Consulta paginada de eventos con filtros por tipo, severidad, IP y rango temporal.
+- Indicadores IP, dominio y hash con fuente, confianza y fecha de expiración. No se incluye una lista inventada de IoC ni se afirma que el prototipo consuma feeds externos.
+- Correlación exacta contra IoC y alerta por repetición de fallos de autenticación.
+- Gestión de estado y asignación de alertas, resumen de actividad y registro de auditoría.
+- Límite de solicitudes por IP para instancia única.
 
-Diseñar y desarrollar progresivamente una solución que permita registrar y consultar eventos de seguridad, identificar patrones de actividad sospechosa, generar y gestionar alertas, dar seguimiento a incidentes y conservar la trazabilidad de las acciones realizadas.
+## Arranque local
 
-### Objetivos específicos
+Requiere Python 3.11 o superior.
 
-- Definir y documentar los requerimientos funcionales del sistema.
-- Establecer historias de usuario y criterios de aceptación verificables.
-- Organizar los requerimientos mediante Issues y etiquetas en GitHub.
-- Planificar y visualizar el trabajo con GitHub Projects.
-- Preparar una estructura inicial para código fuente, configuración, pruebas y documentación.
-- Mantener el historial de cambios mediante commits claros y verificables.
-
-## 3. Estudiante responsable y funciones
-
-**Ramón Martínez** es el único responsable del proyecto GUARDIÁN CARIBE-V1.
-
-Como autor y responsable individual, tiene a su cargo:
-- Análisis y documentación de los requerimientos funcionales.
-- Redacción de historias de usuario y criterios de aceptación.
-- Creación, clasificación y seguimiento de los Issues.
-- Administración de Labels y organización del tablero de GitHub Projects.
-- Organización del repositorio y mantenimiento de la documentación.
-- Control de versiones y registro de cambios mediante commits.
-- Planificación de la implementación y verificación progresiva de las funcionalidades.
-
-## 4. Estado inicial del proyecto
-
-Al inicio de esta versión, el proyecto se encontraba en etapa de organización y planificación. No se contaba con una aplicación funcional implementada ni desplegada en producción.
-
-El trabajo inicial se concentra en establecer la línea base documental: repositorio, estructura de carpetas, catálogo de requerimientos, Issues, etiquetas y tablero de seguimiento. La implementación del software y sus pruebas se realizarán de manera incremental en etapas posteriores.
-
-## 5. Alcance de la versión inicial
-
-Esta versión comprende:
-- Creación y organización del repositorio.
-- Documentación de 35 requerimientos funcionales (RF-01 a RF-35).
-- Registro de los requerimientos como GitHub Issues.
-- Clasificación de los Issues mediante Labels.
-- Organización del flujo de trabajo en GitHub Projects.
-- Preparación de carpetas para código, configuración, pruebas, evidencias y documentación.
-
-No se considera que las funcionalidades estén implementadas por el solo hecho de estar documentadas o registradas como Issues.
-
-## 6. Herramientas y tecnologías previstas
-
-- Python 3.11 o superior.
-- FastAPI para la construcción de la API.
-- SQLAlchemy para el acceso a datos.
-- Pydantic para validación de información.
-- SQLite para prototipo y PostgreSQL como alternativa.
-- Pytest para pruebas automatizadas.
-- Git y GitHub para control de versiones.
-- GitHub Issues, Labels y GitHub Projects para gestión y seguimiento.
-
-## 7. Organización del trabajo
-
-Al tratarse de un proyecto individual, Ramón Martínez organiza y ejecuta las actividades de manera secuencial e incremental, utilizando GitHub para documentar, clasificar y dar seguimiento al trabajo.
-
-Las etapas son:
-
-1. **Planificación:** definir el propósito, alcance y estado inicial del proyecto.
-2. **Análisis:** identificar y redactar los requerimientos funcionales.
-3. **Especificación:** describir cada requerimiento mediante una historia de usuario, criterios de aceptación y prioridad.
-4. **Registro:** crear un Issue por requerimiento y relacionarlo con su identificador RF.
-5. **Clasificación:** utilizar Labels para distinguir tipo de elemento y prioridad.
-6. **Seguimiento:** organizar los Issues en GitHub Projects según su estado.
-7. **Implementación:** desarrollar las funcionalidades de forma incremental.
-8. **Verificación:** ejecutar pruebas y revisar los criterios de aceptación.
-9. **Documentación y configuración:** registrar cambios mediante commits y mantener actualizados los documentos.
-
-### Estados de seguimiento
-
-- **Pendiente:** trabajo todavía no iniciado.
-- **En proceso:** trabajo actualmente en desarrollo.
-- **En revisión:** trabajo sometido a revisión o validación.
-- **Completado:** trabajo terminado y verificado.
-
-## 8. Estructura del repositorio
-
-```text
-GUARDIAN-CARIBE-V1/
-├── README.md
-├── documentacion/
-│   ├── requerimientos.md
-│   └── (otros documentos del proyecto)
-├── src/
-│   └── (código fuente por desarrollar)
-├── tests/
-│   └── (pruebas por desarrollar)
-├── config/
-│   └── (configuración de ejemplo)
-├── evidencias/
-│   └── (capturas de la actividad)
-└── .env.example
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+Copy-Item config/.env.example .env
 ```
 
-Las carpetas reservadas para código, pruebas y configuración se completarán a medida que avance la implementación. Los archivos de secretos reales no deben publicarse en el repositorio.
+Edita `.env`: genera `JWT_SECRET` con `python -c "import secrets; print(secrets.token_urlsafe(48))"` y reemplaza las credenciales de ejemplo por una contraseña única de al menos 12 caracteres. No subas `.env` ni secretos reales.
 
-## 9. Gestión de configuración y control de cambios
+```powershell
+uvicorn guardian_caribe.main:app --app-dir src --reload
+```
 
-GitHub es el repositorio central de los elementos del proyecto. Los cambios en archivos se registran mediante commits con mensajes descriptivos. Los Issues mantienen la trazabilidad entre los requerimientos y las tareas; las Labels permiten clasificarlos y GitHub Projects permite visualizar su estado.
+La API estará en `http://127.0.0.1:8000`; documentación interactiva en `/docs` solo fuera de producción. El administrador bootstrap se crea al iniciar por primera vez cuando se definen `BOOTSTRAP_ADMIN_USERNAME` y `BOOTSTRAP_ADMIN_PASSWORD`.
 
-Cada modificación relevante debe quedar registrada en el historial de commits. Antes de considerar un requerimiento completado, se debe revisar su implementación y verificar sus criterios de aceptación.
+## API principal
 
-## 10. Documentos principales
+Todas las rutas salvo `GET /health` y `POST /auth/login` requieren `Authorization: Bearer <token>`.
 
-- [Catálogo de requerimientos funcionales](documentacion/requerimientos.md)
-- [Issues del proyecto](https://github.com/Ramon-MY/GUARDIAN-CARIBE-V1/issues)
-- [Tablero de GitHub Projects](https://github.com/users/Ramon-MY/projects) — abrir el tablero GUARDIÁN CARIBE-V1.
+| Ruta | Acceso | Uso |
+|---|---|---|
+| `POST /auth/login`, `POST /auth/logout` | Público / usuario autenticado | Iniciar y revocar sesión |
+| `GET/POST /users`, `DELETE /users/{id}` | Admin | Administrar cuentas |
+| `POST /events`, `GET /events` | Admin, analyst / usuarios autenticados | Ingerir y consultar telemetría |
+| `GET/POST /indicators` | Consulta autenticada / admin | Mantener inteligencia de amenazas con procedencia |
+| `GET /alerts`, `PATCH /alerts/{id}` | Consulta autenticada / admin, analyst | Revisar, asignar y actualizar alertas |
+| `GET /analytics/summary` | Usuario autenticado | Métricas de las últimas 24 horas |
 
-## 11. Estado de la entrega documental
+Ejemplo de evento:
 
-La línea base documental contempla el repositorio, el README, el catálogo de 35 requerimientos, los Issues, las Labels y el tablero de seguimiento. Las capturas de evidencias deben mostrar cada uno de estos elementos de forma legible y verificable.
+```json
+{
+  "event_type": "connection_observed",
+  "source": "edge-firewall",
+  "occurred_at": "2026-11-18T15:00:00Z",
+  "severity": "medium",
+  "source_ip": "203.0.113.15",
+  "domain": "example.org",
+  "details": {"action": "blocked"}
+}
+```
 
----
-**GUARDIÁN CARIBE-V1 — Gestión de Configuración de Software**
+Las direcciones del ejemplo pertenecen a rangos reservados para documentación. No las uses como IoC operativo.
+
+## Desarrollo y verificación
+
+```powershell
+python -m pip install -e ".[dev]"
+pytest
+ruff check src tests
+```
+
+Las pruebas cubren autenticación, roles, revocación, validación, ingestión, filtros y alertas por IoC y fuerza bruta. SQLite local permite empezar sin servicios externos.
+
+## Seguridad y límites conocidos
+
+- El limitador y el bloqueo residen en memoria/base local; se reinician con el proceso y no coordinan varias instancias. Para despliegue se requiere almacenamiento compartido (Redis) y límites en proxy.
+- La expiración JWT no sustituye TLS; no publiques el servicio directamente a Internet.
+- El prototipo no trae conectores de agentes/EDR, feeds comerciales, aislamiento de endpoints, respuesta automatizada, MFA ni una interfaz web.
+- Las reglas de detección son deliberadamente pequeñas y explícitas. Requieren ajuste con datos autorizados para reducir falsos positivos.
+- Antes de producción hacen falta migraciones versionadas, PostgreSQL, gestión de secretos, TLS, protección CSRF si se añade sesión de navegador, política de retención, revisión de privacidad, copias cifradas y ejercicios de restauración.
+- Configurar `APP_ENV=production` hace que el servicio se niegue a iniciar mientras no existan migraciones y controles operativos; esta versión no admite despliegue de producción.
+
+## Requerimientos y estado
+
+El catálogo de [35 requerimientos](documentacion/requerimientos.md) describe el objetivo completo. Esta entrega implementa un corte vertical verificable de autenticación/usuarios, ingesta/consulta, IoC, alertas, auditoría y configuración básica. Gestión de incidentes, notas, exportación, restauración y conectores permanecen pendientes; los Issues no se consideran completados por existir código relacionado.
+
+## Proyecto
+
+- [Repositorio](https://github.com/Ramon-MY/GUARDIAN-CARIBE-V1)
+- [Issues](https://github.com/Ramon-MY/GUARDIAN-CARIBE-V1/issues)
+- [PR de mockups #37](https://github.com/Ramon-MY/GUARDIAN-CARIBE-V1/pull/37)
+- [Catálogo de requerimientos](documentacion/requerimientos.md)
