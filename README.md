@@ -80,10 +80,18 @@ Las direcciones del ejemplo pertenecen a rangos reservados para documentación. 
 ```powershell
 python -m pip install -e ".[dev]"
 pytest
-ruff check src tests
+ruff check src tests scripts
 ```
 
 Las pruebas cubren autenticación, roles, revocación, validación, ingestión, filtros y alertas por IoC y fuerza bruta. SQLite local permite empezar sin servicios externos.
+
+Para restaurar una copia local, detén la API, comprueba el archivo y el destino, y confirma el reemplazo:
+
+```powershell
+guardian-restore-sqlite .\backups\guardian-<id>.sqlite3 .\guardian_caribe.db --confirm-replace
+```
+
+Restaura copias de la misma versión del esquema; el prototipo todavía no tiene migraciones.
 
 ## Seguridad y límites conocidos
 
@@ -91,7 +99,7 @@ Las pruebas cubren autenticación, roles, revocación, validación, ingestión, 
 - La expiración JWT no sustituye TLS; no publiques el servicio directamente a Internet.
 - El prototipo no trae conectores de agentes/EDR, feeds comerciales, aislamiento de endpoints, respuesta automatizada, MFA ni una interfaz web.
 - Las reglas de detección son deliberadamente pequeñas y explícitas. Requieren ajuste con datos autorizados para reducir falsos positivos.
-- La copia API solo funciona con SQLite en archivo local. Para restaurar, detén el servicio y usa el script local con la ruta de destino comprobada y `--confirm-replace`.
+- La copia API solo funciona con SQLite en archivo local y descarga datos del sistema, incluidos hashes de contraseñas y telemetría. Limita quién puede acceder a ella; en Linux la API crea el directorio con modo `0700` y las copias con `0600`. Para restaurar, detén el servicio y usa el comando local con la ruta de destino comprobada y `--confirm-replace`.
 - Antes de producción hacen falta migraciones versionadas, PostgreSQL, gestión de secretos, TLS, protección CSRF si se añade sesión de navegador, política de retención, revisión de privacidad, copias cifradas y ejercicios de restauración.
 - Configurar `APP_ENV=production` hace que el servicio se niegue a iniciar mientras no existan migraciones y controles operativos; esta versión no admite despliegue de producción.
 

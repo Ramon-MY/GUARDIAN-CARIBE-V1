@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -897,6 +898,8 @@ def create_app() -> FastAPI:
             )
         backup_dir = Path(settings.backup_directory).resolve()
         backup_dir.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            backup_dir.chmod(0o700)
         backup_id = uuid4().hex
         target = backup_dir / f"guardian-{backup_id}.sqlite3"
         audit(db, user.id, "backup.create", "backup", backup_id)
@@ -909,6 +912,8 @@ def create_app() -> FastAPI:
             if result is None or result[0] != "ok":
                 target.unlink(missing_ok=True)
                 raise HTTPException(status_code=500, detail="SQLite backup integrity check failed")
+            if os.name != "nt":
+                target.chmod(0o600)
         finally:
             destination.close()
             source_connection.close()

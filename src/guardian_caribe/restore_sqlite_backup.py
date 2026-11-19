@@ -35,6 +35,12 @@ def restore(backup: Path, destination: Path, confirmed: bool) -> None:
         )
     if backup == destination:
         raise ValueError("Backup and destination must be different files")
+    if destination.suffix.lower() not in {".db", ".sqlite", ".sqlite3"}:
+        raise ValueError("Destination must use a .db, .sqlite, or .sqlite3 extension")
+    if destination.exists():
+        with destination.open("rb") as existing:
+            if existing.read(16) != b"SQLite format 3\x00":
+                raise ValueError("Existing destination is not a SQLite database")
     verify_database(backup)
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
