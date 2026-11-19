@@ -282,7 +282,10 @@ def fetch_taxii_indicators(
     next_token: str | None = None
     try:
         for page in range(settings.taxii_max_pages):
-            params: dict[str, str | int] = {\n                "limit": settings.taxii_page_size,\n                "match[type]": "indicator",\n            }
+            params: dict[str, str | int] = {
+                "limit": settings.taxii_page_size,
+                "match[type]": "indicator",
+            }
             if next_token:
                 params["next"] = next_token
             payload = _request_json(
