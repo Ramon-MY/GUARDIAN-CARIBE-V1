@@ -1011,9 +1011,7 @@ def create_app() -> FastAPI:
                     and settings.misp_api_key.get_secret_value()
                 )
             },
-            "taxii": {
-                "configured": bool(settings.taxii_api_root and settings.taxii_collection_id)
-            },
+            "taxii": {"configured": bool(settings.taxii_api_root and settings.taxii_collection_id)},
         }
 
     @app.post("/integrations/misp/sync", status_code=200, tags=["integrations"])

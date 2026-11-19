@@ -84,8 +84,9 @@ def test_misp_rejects_http_endpoint_without_sending_credentials():
         called = True
         return Response(200, json={"response": []})
 
-    with Client(transport=MockTransport(handler)) as client, pytest.raises(
-        IntegrationError, match="misp_invalid_url"
+    with (
+        Client(transport=MockTransport(handler)) as client,
+        pytest.raises(IntegrationError, match="misp_invalid_url"),
     ):
         fetch_misp_indicators(settings, client)
 
@@ -98,9 +99,10 @@ def test_misp_error_does_not_expose_api_key_or_response_body():
     def handler(_request):
         return Response(401, text="secret-key is invalid")
 
-    with Client(transport=MockTransport(handler)) as client, pytest.raises(
-        IntegrationError
-    ) as error:
+    with (
+        Client(transport=MockTransport(handler)) as client,
+        pytest.raises(IntegrationError) as error,
+    ):
         fetch_misp_indicators(settings, client)
 
     assert str(error.value) == "misp_http_401"
@@ -165,8 +167,9 @@ def test_taxii_rejects_missing_collection_without_network_request():
         called = True
         return Response(200, json={"objects": [], "more": False})
 
-    with Client(transport=MockTransport(handler)) as client, pytest.raises(
-        IntegrationError, match="taxii_collection_not_configured"
+    with (
+        Client(transport=MockTransport(handler)) as client,
+        pytest.raises(IntegrationError, match="taxii_collection_not_configured"),
     ):
         fetch_taxii_indicators(settings, client)
 
@@ -182,7 +185,8 @@ def test_taxii_stops_at_page_limit_instead_of_returning_partial_data():
         TAXII_COLLECTION_ID="collection-123",
         TAXII_MAX_PAGES=1,
     )
-    with Client(transport=MockTransport(handler)) as client, pytest.raises(
-        IntegrationError, match="taxii_page_limit_reached"
+    with (
+        Client(transport=MockTransport(handler)) as client,
+        pytest.raises(IntegrationError, match="taxii_page_limit_reached"),
     ):
         fetch_taxii_indicators(settings, client)
