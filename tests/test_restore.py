@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from scripts.restore_sqlite_backup import restore
+from guardian_caribe.restore_sqlite_backup import restore
 
 
 def create_database(path, value: str) -> None:
