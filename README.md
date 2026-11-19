@@ -84,6 +84,15 @@ Las direcciones del ejemplo pertenecen a rangos reservados para documentación. 
 python -m pip install -e ".[dev]"
 pytest
 ruff check src tests scripts
+ruff format --check src tests scripts
+```
+
+Para ejecutar los análisis de seguridad que corre CI:
+
+```powershell
+python -m pip install -e ".[dev,security]"
+bandit -r src
+pip-audit
 ```
 
 Las pruebas cubren autenticación, roles, revocación, validación, lotes, filtros, límites, configuración, auditoría, reportes, incidentes y correlación de IoC. SQLite local permite empezar sin servicios externos.
