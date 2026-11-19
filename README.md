@@ -55,6 +55,7 @@ Todas las rutas salvo `GET /health` y `POST /auth/login` requieren `Authorizatio
 | `GET/POST /users`, `PATCH/DELETE /users/{id}` | Admin | Administrar cuentas y roles |
 | `POST /events`, `POST /integrations/events`, `GET /events`, `GET /events/{id}` | Admin, analyst / usuarios autenticados | Ingesta individual y por lotes; consulta y filtros |
 | `GET/POST /indicators`, `GET /indicators/search`, `POST /integrations/indicators` | Consulta autenticada / admin | Mantener, importar por lotes y buscar IoC con procedencia |
+| `GET /integrations/providers`, `POST /integrations/misp/sync`, `POST /integrations/taxii/sync` | Admin | Consultar configuración segura e importar IoC en modo solo lectura desde MISP o TAXII 2.1 |
 | `GET /alerts`, `PATCH /alerts/{id}` | Consulta autenticada / admin, analyst | Revisar, asignar y actualizar alertas |
 | `GET /analytics/summary` | Usuario autenticado | Métricas de las últimas 24 horas |
 | `/rules`, `/incidents`, `/incidents/{id}/notes` | Admin / admin, analyst | Reglas, seguimiento e historial de investigación |
@@ -109,8 +110,9 @@ Restaura copias del esquema compatible; el procedimiento añade una entrada `mai
 
 - El limitador y el bloqueo residen en memoria/base local; se reinician con el proceso y no coordinan varias instancias. Para despliegue se requiere almacenamiento compartido (Redis) y límites en proxy.
 - La expiración JWT no sustituye TLS; no publiques el servicio directamente a Internet.
-- El prototipo no trae conectores de agentes/EDR, feeds comerciales, aislamiento de endpoints, respuesta automatizada, MFA ni una interfaz web.
-- Los endpoints de integración reciben datos normalizados; todavía no consultan APIs de proveedores por su cuenta. Hace falta elegir feeds/EDR concretos, acordar sus esquemas y configurar credenciales como secretos del entorno.
+- No hay conectores de agentes/EDR, aislamiento de endpoints, respuesta automatizada, MFA ni interfaz web.
+- MISP REST y TAXII 2.1 (incluido OpenCTI) tienen sincronización saliente de solo lectura iniciada manualmente por administradores. Se importan IoC de IP, dominio, URL y hash que pasen validación; los patrones STIX compuestos o no compatibles se omiten.
+- Configura MISP con URL HTTPS y clave dedicada de solo lectura; configura TAXII con URL de API root, ID de colección y, si hace falta, token Bearer. Los secretos viven solo en variables de entorno. Se requiere TLS válido; los clientes no siguen redirecciones ni aceptan URL arbitrarias del usuario. Otros feeds, EDR y SIEM siguen pendientes de seleccionar.
 - Las reglas de detección son deliberadamente pequeñas y explícitas. Requieren ajuste con datos autorizados para reducir falsos positivos.
 - La copia API solo funciona con SQLite en archivo local y descarga datos del sistema, incluidos hashes de contraseñas y telemetría. Limita quién puede acceder a ella; en Linux la API crea el directorio con modo `0700` y las copias con `0600`. Para restaurar, detén el servicio y usa el comando local con la ruta de destino comprobada y `--confirm-replace`.
 - Antes de producción hacen falta migraciones versionadas, PostgreSQL, gestión de secretos, TLS, protección CSRF si se añade sesión de navegador, política de retención, revisión de privacidad, copias cifradas y ejercicios de restauración.

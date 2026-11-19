@@ -24,6 +24,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from guardian_caribe.config import get_settings
+from guardian_caribe.integrations import IntegrationError, fetch_misp_indicators, fetch_taxii_indicators
 from guardian_caribe.db import SessionLocal, engine, get_db, upgrade_schema
 from guardian_caribe.models import (
     Alert,
@@ -347,6 +348,49 @@ def create_app() -> FastAPI:
                 ),
             )
         )
+
+    def sync_provider_indicators(provider: str, loader, user: User, db: Session) -> dict:
+        try:
+            indicators = loader(settings)
+        except IntegrationError as exc:
+            error_code = str(exc)
+            audit(
+                db,
+                user.id,
+                f"integration.{provider}.failed",
+                "integration",
+                provider,
+                {"error_code": error_code},
+            )
+            db.commit()
+            status = 503 if error_code.endswith("_not_configured") else 502
+            raise HTTPException(
+                status_code=status,
+                detail=f"{provider.upper()} sync failed; check server configuration and logs.",
+            ) from None
+
+        created = skipped = 0
+        for offset in range(0, len(indicators), 500):
+            result = ingest_indicator_batch(
+                IndicatorBatchCreate(indicators=indicators[offset : offset + 500]), user, db
+            )
+            created += result["created_count"]
+            skipped += result["skipped_existing_count"]
+        audit(
+            db,
+            user.id,
+            f"integration.{provider}.completed",
+            "integration",
+            provider,
+            {"fetched_count": len(indicators), "created_count": created, "skipped_count": skipped},
+        )
+        db.commit()
+        return {
+            "provider": provider,
+            "fetched_count": len(indicators),
+            "created_count": created,
+            "skipped_existing_count": skipped,
+        }
 
     def get_current_user(
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
@@ -952,6 +996,35 @@ def create_app() -> FastAPI:
                 IndicatorRead.model_validate(item).model_dump(mode="json") for item in stored
             ],
         }
+
+    @app.get("/integrations/providers", tags=["integrations"])
+    def list_integrations(_user: User = Depends(require_roles("admin"))):
+        return {
+            "misp": {
+                "configured": bool(
+                    settings.misp_url
+                    and settings.misp_api_key
+                    and settings.misp_api_key.get_secret_value()
+                )
+            },
+            "taxii": {
+                "configured": bool(settings.taxii_api_root and settings.taxii_collection_id)
+            },
+        }
+
+    @app.post("/integrations/misp/sync", status_code=200, tags=["integrations"])
+    def sync_misp_indicators(
+        user: User = Depends(require_roles("admin")),
+        db: Session = Depends(get_db),
+    ):
+        return sync_provider_indicators("misp", fetch_misp_indicators, user, db)
+
+    @app.post("/integrations/taxii/sync", status_code=200, tags=["integrations"])
+    def sync_taxii_indicators(
+        user: User = Depends(require_roles("admin")),
+        db: Session = Depends(get_db),
+    ):
+        return sync_provider_indicators("taxii", fetch_taxii_indicators, user, db)
 
     @app.get("/indicators/search", tags=["threat-intelligence"])
     def search_indicators(

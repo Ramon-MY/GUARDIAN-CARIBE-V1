@@ -38,21 +38,24 @@ Esta matriz corresponde al corte implementado en la rama del PR #38. “Implemen
 | 21 Gestión de incidentes | `POST /incidents` | Incidente enlazable a una alerta y con estado inicial |
 | 22 Seguimiento | `GET/PATCH /incidents/{id}` | Estado/asignación y cambios visibles en historial |
 | 23 Notas | `POST /incidents/{id}/notes`, detalle del incidente | Notas anexas, con autor/fecha; no se sobrescriben |
-| 24 Indicadores | `POST/GET /indicators`, `POST /integrations/indicators` | IP, dominio, URL, hash, procedencia, confianza y caducidad |
+| 24 Indicadores | `POST/GET /indicators`, `POST /integrations/indicators`, `POST /integrations/misp/sync`, `POST /integrations/taxii/sync` | IP, dominio, URL y hash desde API interna, MISP REST y TAXII 2.1; validar con fuentes autorizadas |
 | 25 Consulta de IoC | `GET /indicators/search` | Búsqueda exacta devuelve `found`, `count` y `matches` |
 | 26 Panel | `GET /analytics/summary?hours=...` | Eventos, alertas, incidentes y ventana seleccionada |
 | 27 Reportes | `GET /reports/summary` | Periodo, fecha de generación, filtros y conteos |
 | 28 Exportación | `GET /reports/export` | CSV/JSON con filtros; escape de fórmulas y metadatos de descarga |
 | 29 Auditoría | `GET /audit` | Filtros por actor, acción, recurso y periodo; sin ruta de edición/borrado |
 | 30 Configuración | `GET/PUT /system/config`, `DELETE /system/config/{key}` | Parámetros validados, persistentes y auditados; sin exponer secretos |
-| 31 Entorno | `.env`, `config/.env.example`, `Settings` | Entorno identificado; secretos reales fuera del repositorio |
+| 31 Entorno | `.env`, `config/.env.example`, `Settings` | MISP y TAXII son opcionales; endpoints HTTPS y credenciales permanecen en variables de entorno y no se exponen en la API |
 | 32 Errores operativos | `GET /operations/errors` | Errores internos y validaciones consultables por administradores sin datos del cuerpo |
 | 33 Respaldo/restauración | `POST/GET /maintenance/backups`, CLI offline | Verificación SQLite; confirmación de reemplazo; restauración deja auditoría |
 | 34 Límite de solicitudes | Configuración por cliente/IP de instancia única | Métrica y alerta; no coordina múltiples réplicas |
 | 35 Pruebas | Pytest y workflow CI | Suite local y matriz Python 3.11/3.12; revisar resultado del commit final |
 
-## Integraciones externas pendientes
+## Integraciones externas
 
-El API permite que un conector de terceros envíe eventos/IoC normalizados por lotes. No realiza llamadas salientes a feeds ni a consolas EDR. Para esos conectores falta seleccionar proveedor y versión de API, definir campos y permisos, y entregar credenciales de prueba mediante secretos del entorno. No se debe cerrar RF ni dar por integrada una fuente hasta validar esos intercambios con el proveedor elegido.
-
-Agentes EDR, feeds comerciales, aislamiento/respuesta automática, interfaz web y operación de varias instancias siguen fuera de este corte. Producción continúa bloqueada hasta completar controles de operación y revisar las migraciones en un entorno de despliegue.
+- MISP Automation API usa `POST /attributes/restSearch` con clave API de solo lectura y filtro `to_ids`; se importan IP, dominio/hostname, URL y MD5/SHA-1/SHA-256.
+- OpenCTI/TAXII usa el API root TAXII 2.1 y una colección configurada; se consulta `collections/{id}/objects/` con paginación y filtro de tipo indicador.
+- `GET /integrations/providers` (admin) informa solo si cada conector está configurado. `POST /integrations/misp/sync` y `POST /integrations/taxii/sync` (admin) importan IoC en modo solo lectura y devuelven conteos, sin credenciales ni contenido original.
+- Variables: `MISP_URL`, `MISP_API_KEY`, `TAXII_API_ROOT`, `TAXII_COLLECTION_ID`, `TAXII_BEARER_TOKEN`, límites de páginas y tiempo máximo. Usa solo URLs HTTPS de confianza; TLS se verifica y las redirecciones están deshabilitadas.
+- TAXII importa patrones STIX simples de IP, dominio, URL y hashes MD5/SHA-1/SHA-256. Patrones compuestos/no compatibles se omiten; ajusta alcance y permisos en el proveedor.
+- Agentes EDR, feeds adicionales, aislamiento/respuesta automática, interfaz web y operación de varias instancias siguen fuera de este corte. Producción continúa bloqueada hasta completar controles operativos y revisar las migraciones en un entorno de despliegue.

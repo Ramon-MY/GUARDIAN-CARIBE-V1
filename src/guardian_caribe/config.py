@@ -24,6 +24,17 @@ class Settings(BaseSettings):
     bootstrap_admin_username: str | None = None
     bootstrap_admin_password: SecretStr | None = None
 
+    integration_timeout_seconds: float = Field(default=15, gt=0, le=120)
+    misp_url: str | None = Field(default=None, max_length=512, alias="MISP_URL")
+    misp_api_key: SecretStr | None = Field(default=None, alias="MISP_API_KEY")
+    misp_page_size: int = Field(default=100, ge=1, le=500)
+    misp_max_pages: int = Field(default=5, ge=1, le=20)
+    taxii_api_root: str | None = Field(default=None, max_length=512, alias="TAXII_API_ROOT")
+    taxii_collection_id: str | None = Field(default=None, max_length=128, alias="TAXII_COLLECTION_ID")
+    taxii_bearer_token: SecretStr | None = Field(default=None, alias="TAXII_BEARER_TOKEN")
+    taxii_page_size: int = Field(default=100, ge=1, le=500)
+    taxii_max_pages: int = Field(default=5, ge=1, le=20)
+
     def validate_runtime(self) -> None:
         secret = self.jwt_secret.get_secret_value()
         if len(secret) < 32 or secret.lower().startswith(("replace-with", "change-me")):

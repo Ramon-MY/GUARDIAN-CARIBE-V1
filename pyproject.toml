@@ -16,13 +16,14 @@ dependencies = [
   "pwdlib[argon2]>=0.2,<1.0",
   "python-multipart>=0.0.12,<1.0",
   "psycopg[binary]>=3.2,<4.0",
+  "httpx>=0.27,<1.0",
 ]
 
 [project.scripts]
 guardian-restore-sqlite = "guardian_caribe.restore_sqlite_backup:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=9.0.3,<10.0", "httpx>=0.27,<1.0", "ruff>=0.7,<1.0"]
+dev = ["pytest>=9.0.3,<10.0", "ruff>=0.7,<1.0"]
 security = ["bandit>=1.8,<2.0", "pip-audit>=2.7,<3.0"]
 
 [tool.setuptools.packages.find]
