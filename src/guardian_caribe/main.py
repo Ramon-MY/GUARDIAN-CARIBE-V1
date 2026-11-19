@@ -24,8 +24,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from guardian_caribe.config import get_settings
-from guardian_caribe.integrations import IntegrationError, fetch_misp_indicators, fetch_taxii_indicators
 from guardian_caribe.db import SessionLocal, engine, get_db, upgrade_schema
+from guardian_caribe.integrations import (
+    IntegrationError,
+    fetch_misp_indicators,
+    fetch_taxii_indicators,
+)
 from guardian_caribe.models import (
     Alert,
     AuditLog,

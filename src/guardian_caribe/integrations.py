@@ -213,7 +213,16 @@ def fetch_misp_indicators(
                 headers=headers,
                 json_body={
                     "returnFormat": "json",
-                    "type": ["ip-src", "ip-dst", "domain", "hostname", "url", "md5", "sha1", "sha256"],
+                    "type": [
+                        "ip-src",
+                        "ip-dst",
+                        "domain",
+                        "hostname",
+                        "url",
+                        "md5",
+                        "sha1",
+                        "sha256",
+                    ],
                     "to_ids": True,
                     "limit": settings.misp_page_size,
                     "page": page,
