@@ -206,3 +206,16 @@ def test_backup_endpoint_returns_a_consistent_sqlite_file(
     backups = client.get("/maintenance/backups", headers=auth_headers)
     assert backups.status_code == 200
     assert len(backups.json()) == 1
+
+
+def test_rate_limit_denials_create_one_cooldown_alert(client, auth_headers, monkeypatch):
+    from guardian_caribe.main import rate_limiter
+
+    monkeypatch.setattr(rate_limiter, "limit", 2)
+    assert client.get("/events").status_code == 401
+    assert client.get("/events").status_code == 429
+    assert client.get("/events").status_code == 429
+    monkeypatch.setattr(rate_limiter, "limit", 100)
+    alerts = client.get("/alerts", headers=auth_headers).json()
+    rate_limit_alerts = [alert for alert in alerts if alert["rule_id"] == "request-rate-limit"]
+    assert len(rate_limit_alerts) == 1

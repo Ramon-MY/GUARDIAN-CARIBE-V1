@@ -20,6 +20,7 @@ def client():
     with TestClient(app) as test_client:
         yield test_client
     rate_limiter.requests.clear()
+    rate_limiter.reported.clear()
     rate_limiter.denials = 0
 
 

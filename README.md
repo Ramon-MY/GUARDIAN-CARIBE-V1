@@ -20,7 +20,7 @@ Prototipo académico de una API XDR ligera para registrar telemetría de segurid
 - Reglas configurables de detección exacta/contiene por administradores.
 - Gestión de alertas e incidentes, transiciones de estado, asignación y notas de investigación.
 - Resumen de actividad, exportación CSV/JSON de reportes y consulta administrativa de auditoría.
-- Límite de solicitudes por IP para instancia única.
+- Límite de solicitudes por IP para instancia única; denegaciones producen evento/auditoría y una alerta agregada con enfriamiento de cinco minutos.
 - Copia SQLite con verificación y restauración offline que exige confirmación explícita.
 
 ## Arranque local

@@ -9,6 +9,7 @@ import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from ipaddress import ip_address
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import and_, func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from guardian_caribe.config import get_settings
@@ -78,6 +80,7 @@ class LocalRateLimiter:
     def __init__(self, limit: int):
         self.limit = limit
         self.requests: dict[str, deque[float]] = defaultdict(deque)
+        self.reported: dict[str, float] = {}
         self.lock = threading.Lock()
         self.denials = 0
 
@@ -102,6 +105,25 @@ class LocalRateLimiter:
                 self.denials += 1
                 return False
             bucket.append(now)
+            return True
+
+    def should_report(self, key: str, cooldown_seconds: int = 300) -> bool:
+        now = time.monotonic()
+        with self.lock:
+            last = self.reported.get(key)
+            if last is not None and now - last < cooldown_seconds:
+                return False
+            if key not in self.reported and len(self.reported) >= 10_000:
+                stale_keys = [
+                    address
+                    for address, reported_at in self.reported.items()
+                    if reported_at <= now - cooldown_seconds
+                ]
+                for stale_key in stale_keys:
+                    del self.reported[stale_key]
+                if len(self.reported) >= 10_000:
+                    return False
+            self.reported[key] = now
             return True
 
 
@@ -160,6 +182,52 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    def record_rate_limit_breach(client_address: str) -> None:
+        try:
+            source_ip = str(ip_address(client_address))
+        except ValueError:
+            source_ip = None
+        now = utcnow()
+        try:
+            with SessionLocal() as db:
+                event = SecurityEvent(
+                    event_type="request_rate_limited",
+                    source="api-rate-limiter",
+                    occurred_at=now,
+                    severity="medium",
+                    source_ip=source_ip,
+                    details_json=json.dumps(
+                        {"window_seconds": 60, "configured_limit": rate_limiter.limit}
+                    ),
+                    created_by_id=None,
+                )
+                db.add(event)
+                db.flush()
+                source_description = f" from {source_ip}" if source_ip else ""
+                db.add(
+                    Alert(
+                        title="API request rate limit exceeded",
+                        description=(
+                            f"A client{source_description} exceeded the configured request "
+                            "limit; repeated reports are aggregated for five minutes."
+                        ),
+                        severity="medium",
+                        rule_id="request-rate-limit",
+                        event_id=event.id,
+                    )
+                )
+                db.add(
+                    AuditLog(
+                        actor_id=None,
+                        action="request.rate_limited",
+                        resource_type="security_event",
+                        resource_id=str(event.id),
+                    )
+                )
+                db.commit()
+        except SQLAlchemyError:
+            logger.error("Could not persist a rate-limit security event")
+
     @app.middleware("http")
     async def enforce_rate_limit(request: Request, call_next):
         request_id = uuid4().hex
@@ -170,6 +238,8 @@ def create_app() -> FastAPI:
             return response
         key = request.client.host if request.client else "unknown"
         if not rate_limiter.allow(key):
+            if rate_limiter.should_report(key):
+                record_rate_limit_breach(key)
             return Response(
                 status_code=429, headers={"Retry-After": "60"}, content="Rate limit exceeded"
             )
