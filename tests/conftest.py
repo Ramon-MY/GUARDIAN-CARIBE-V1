@@ -10,18 +10,29 @@ import pytest
 from fastapi.testclient import TestClient
 
 from guardian_caribe.db import Base, engine
-from guardian_caribe.main import app, rate_limiter
+from guardian_caribe.main import DEFAULT_RUNTIME_CONFIG, app, rate_limiter, settings
 
 
 @pytest.fixture()
 def client():
+    for key, value in DEFAULT_RUNTIME_CONFIG.items():
+        setattr(settings, key, value)
+    rate_limiter.limit = settings.rate_limit_per_minute
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    with TestClient(app) as test_client:
+    with TestClient(
+        app,
+        base_url="http://198.51.100.21",
+        client=("198.51.100.21", 50000),
+        raise_server_exceptions=False,
+    ) as test_client:
         yield test_client
     rate_limiter.requests.clear()
     rate_limiter.reported.clear()
     rate_limiter.denials = 0
+    for key, value in DEFAULT_RUNTIME_CONFIG.items():
+        setattr(settings, key, value)
+    rate_limiter.limit = settings.rate_limit_per_minute
 
 
 @pytest.fixture()

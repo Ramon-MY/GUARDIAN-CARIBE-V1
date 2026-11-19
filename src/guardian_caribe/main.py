@@ -15,14 +15,16 @@ from uuid import uuid4
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import and_, func, select
+from pydantic import ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from guardian_caribe.config import get_settings
-from guardian_caribe.db import Base, SessionLocal, engine, get_db
+from guardian_caribe.db import SessionLocal, engine, get_db, upgrade_schema
 from guardian_caribe.models import (
     Alert,
     AuditLog,
@@ -31,6 +33,7 @@ from guardian_caribe.models import (
     IncidentNote,
     Indicator,
     RevokedToken,
+    RuntimeSetting,
     SecurityEvent,
     User,
     utcnow,
@@ -41,6 +44,7 @@ from guardian_caribe.schemas import (
     DetectionRuleCreate,
     DetectionRuleRead,
     DetectionRuleUpdate,
+    EventBatchCreate,
     EventCreate,
     EventRead,
     IncidentCreate,
@@ -48,12 +52,15 @@ from guardian_caribe.schemas import (
     IncidentNoteRead,
     IncidentRead,
     IncidentUpdate,
+    IndicatorBatchCreate,
     IndicatorCreate,
     IndicatorRead,
     LoginRequest,
+    RuntimeConfigUpdate,
     TokenRead,
     UserCreate,
     UserRead,
+    UserUpdate,
 )
 from guardian_caribe.security import (
     create_access_token,
@@ -128,17 +135,32 @@ class LocalRateLimiter:
 
 
 rate_limiter = LocalRateLimiter(settings.rate_limit_per_minute)
+RUNTIME_CONFIG_FIELDS = (
+    "password_min_length",
+    "max_login_attempts",
+    "login_lock_minutes",
+    "brute_force_window_minutes",
+    "brute_force_threshold",
+    "alert_dedupe_minutes",
+    "rate_limit_per_minute",
+)
+DEFAULT_RUNTIME_CONFIG = {key: getattr(settings, key) for key in RUNTIME_CONFIG_FIELDS}
 
 
 def create_app() -> FastAPI:
     def initialize() -> None:
         settings.validate_runtime()
-        Base.metadata.create_all(bind=engine)
+        upgrade_schema()
         if bool(settings.bootstrap_admin_username) != bool(settings.bootstrap_admin_password):
             raise RuntimeError(
                 "Configura ambos valores BOOTSTRAP_ADMIN_USERNAME y BOOTSTRAP_ADMIN_PASSWORD."
             )
         with SessionLocal() as db:
+            for override in db.scalars(select(RuntimeSetting)).all():
+                if override.key in RUNTIME_CONFIG_FIELDS:
+                    setattr(settings, override.key, int(override.value))
+            rate_limiter.limit = settings.rate_limit_per_minute
+            settings.validate_runtime()
             if settings.bootstrap_admin_username and settings.bootstrap_admin_password:
                 exists = db.scalar(
                     select(User.id).where(User.username == settings.bootstrap_admin_username)
@@ -258,9 +280,51 @@ def create_app() -> FastAPI:
             request_id,
             request.url.path,
         )
+        try:
+            with SessionLocal() as db:
+                audit(
+                    db,
+                    None,
+                    "api.error",
+                    "operation",
+                    details={
+                        "error_type": type(exc).__name__,
+                        "request_id": request_id,
+                        "path": request.url.path,
+                    },
+                )
+                db.commit()
+        except SQLAlchemyError:
+            logger.error("Could not persist operational error request_id=%s", request_id)
         return JSONResponse(
             status_code=500,
             content={"detail": "Internal server error", "request_id": request_id},
+            headers={"X-Request-ID": request_id, "Cache-Control": "no-store"},
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError):
+        request_id = getattr(request.state, "request_id", uuid4().hex)
+        fields = [".".join(str(part) for part in error.get("loc", ())) for error in exc.errors()]
+        try:
+            with SessionLocal() as db:
+                audit(
+                    db,
+                    None,
+                    "api.validation_error",
+                    "operation",
+                    details={
+                        "request_id": request_id,
+                        "path": request.url.path,
+                        "fields": fields,
+                    },
+                )
+                db.commit()
+        except SQLAlchemyError:
+            logger.error("Could not persist validation error request_id=%s", request_id)
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "Request validation failed", "request_id": request_id},
             headers={"X-Request-ID": request_id, "Cache-Control": "no-store"},
         )
 
@@ -270,6 +334,7 @@ def create_app() -> FastAPI:
         action: str,
         resource: str,
         resource_id: int | str | None = None,
+        details: dict | None = None,
     ) -> None:
         db.add(
             AuditLog(
@@ -277,6 +342,9 @@ def create_app() -> FastAPI:
                 action=action,
                 resource_type=resource,
                 resource_id=str(resource_id) if resource_id is not None else None,
+                details_json=json.dumps(
+                    details or {}, separators=(",", ":"), ensure_ascii=False, default=str
+                ),
             )
         )
 
@@ -324,6 +392,7 @@ def create_app() -> FastAPI:
             "source_ip": event.source_ip,
             "destination_ip": event.destination_ip,
             "domain": event.domain,
+            "url": event.url,
             "file_hash": event.file_hash,
             "details": json.loads(event.details_json),
         }
@@ -331,14 +400,49 @@ def create_app() -> FastAPI:
     def maybe_alert_event(db: Session, event: SecurityEvent) -> None:
         now = utcnow()
 
+        def link_duplicate_evidence(alert: Alert) -> None:
+            db.add(
+                AuditLog(
+                    actor_id=event.created_by_id,
+                    action="alert.evidence.add",
+                    resource_type="alert",
+                    resource_id=str(alert.id),
+                    details_json=json.dumps({"event_id": event.id}),
+                )
+            )
+
+        def recent_alert(rule_id: str, indicator_id: int | None = None) -> Alert | None:
+            conditions = [
+                Alert.rule_id == rule_id,
+                Alert.created_at >= now - timedelta(minutes=settings.alert_dedupe_minutes),
+                Alert.status != "closed",
+            ]
+            if indicator_id is not None:
+                conditions.append(Alert.indicator_id == indicator_id)
+                query = select(Alert).where(*conditions)
+            else:
+                query = (
+                    select(Alert)
+                    .join(SecurityEvent, SecurityEvent.id == Alert.event_id)
+                    .where(
+                        *conditions,
+                        SecurityEvent.event_type == event.event_type,
+                        SecurityEvent.source == event.source,
+                        SecurityEvent.source_ip == event.source_ip,
+                        SecurityEvent.destination_ip == event.destination_ip,
+                        SecurityEvent.domain == event.domain,
+                        SecurityEvent.url == event.url,
+                        SecurityEvent.file_hash == event.file_hash,
+                    )
+                )
+            return db.scalar(query.order_by(Alert.id.desc()))
+
         def add_indicator_alert(
             indicator: Indicator, title: str, description: str, severity: str
         ) -> None:
             prior = db.scalar(
-                select(Alert.id).where(
-                    Alert.event_id == event.id, Alert.indicator_id == indicator.id
-                )
-            )
+                select(Alert).where(Alert.event_id == event.id, Alert.indicator_id == indicator.id)
+            ) or recent_alert("ioc-match", indicator.id)
             if prior is None:
                 db.add(
                     Alert(
@@ -350,6 +454,8 @@ def create_app() -> FastAPI:
                         indicator_id=indicator.id,
                     )
                 )
+            else:
+                link_duplicate_evidence(prior)
 
         if event.source_ip:
             indicator = db.scalar(
@@ -381,6 +487,21 @@ def create_app() -> FastAPI:
                     "Event domain matched an active threat-intelligence indicator.",
                     "high",
                 )
+        if event.url:
+            indicator = db.scalar(
+                select(Indicator).where(
+                    Indicator.indicator_type == "url",
+                    Indicator.value == event.url,
+                    (Indicator.expires_at.is_(None)) | (Indicator.expires_at > now),
+                )
+            )
+            if indicator:
+                add_indicator_alert(
+                    indicator,
+                    "Known malicious URL observed",
+                    "Event URL matched an active threat-intelligence indicator.",
+                    "high",
+                )
         if event.file_hash:
             indicator = db.scalar(
                 select(Indicator).where(
@@ -407,22 +528,22 @@ def create_app() -> FastAPI:
                 else rule.match_value.lower() in str(observed).lower()
             )
             rule_key = f"rule-{rule.id}"
-            if (
-                matched
-                and db.scalar(
-                    select(Alert.id).where(Alert.event_id == event.id, Alert.rule_id == rule_key)
-                )
-                is None
-            ):
-                db.add(
-                    Alert(
-                        title=rule.name,
-                        description=f"{rule.description} (event #{event.id})",
-                        severity=rule.severity,
-                        rule_id=rule_key,
-                        event_id=event.id,
+            if matched:
+                prior = db.scalar(
+                    select(Alert).where(Alert.event_id == event.id, Alert.rule_id == rule_key)
+                ) or recent_alert(rule_key)
+                if prior is None:
+                    db.add(
+                        Alert(
+                            title=rule.name,
+                            description=f"{rule.description} (event #{event.id})",
+                            severity=rule.severity,
+                            rule_id=rule_key,
+                            event_id=event.id,
+                        )
                     )
-                )
+                else:
+                    link_duplicate_evidence(prior)
 
         if event.event_type == "login_failed" and event.source_ip:
             since = now - timedelta(minutes=settings.brute_force_window_minutes)
@@ -455,13 +576,26 @@ def create_app() -> FastAPI:
                         event_id=event.id,
                     )
                 )
+            elif count >= settings.brute_force_threshold:
+                prior = db.scalar(
+                    select(Alert)
+                    .where(
+                        Alert.rule_id == "repeated-login-failures",
+                        Alert.status != "closed",
+                        Alert.created_at >= since,
+                        Alert.description.contains(event.source_ip),
+                    )
+                    .order_by(Alert.id.desc())
+                )
+                if prior:
+                    link_duplicate_evidence(prior)
 
     @app.get("/health", tags=["operations"])
     def health():
         return {"status": "ok", "service": "guardian-caribe", "mode": settings.app_env}
 
     @app.post("/auth/login", response_model=TokenRead, tags=["authentication"])
-    def login(payload: LoginRequest, db: Session = Depends(get_db)):
+    def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
         user = db.scalar(select(User).where(User.username == payload.username))
         encoded = user.password_hash if user else None
         valid = safe_compare_password(payload.password, encoded)
@@ -473,7 +607,26 @@ def create_app() -> FastAPI:
                 user.failed_login_attempts += 1
                 if user.failed_login_attempts >= settings.max_login_attempts:
                     user.locked_until = now + timedelta(minutes=settings.login_lock_minutes)
-                db.commit()
+            client_ip = None
+            if request.client is not None:
+                try:
+                    client_ip = str(ip_address(request.client.host))
+                except ValueError:
+                    pass
+            event = SecurityEvent(
+                event_type="login_failed",
+                source="api-authentication",
+                occurred_at=now,
+                severity="medium",
+                source_ip=client_ip,
+                details_json=json.dumps({"reason": "invalid_credentials"}),
+                created_by_id=None,
+            )
+            db.add(event)
+            db.flush()
+            maybe_alert_event(db, event)
+            audit(db, None, "auth.login_failed", "authentication")
+            db.commit()
             raise HTTPException(status_code=401, detail="Invalid username or password")
         user.failed_login_attempts = 0
         user.locked_until = None
@@ -535,10 +688,79 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=400, detail="Administrators cannot deactivate themselves"
             )
+        if target.is_active and target.role == "admin":
+            active_admins = db.scalar(
+                select(func.count(User.id)).where(User.role == "admin", User.is_active.is_(True))
+            )
+            if active_admins <= 1:
+                raise HTTPException(status_code=409, detail="Cannot deactivate the last admin")
         target.is_active = False
         audit(db, actor.id, "user.deactivate", "user", target.id)
         db.commit()
         return Response(status_code=204)
+
+    @app.patch("/users/{user_id}", response_model=UserRead, tags=["administration"])
+    def update_user(
+        user_id: int,
+        payload: UserUpdate,
+        actor: User = Depends(require_roles("admin")),
+        db: Session = Depends(get_db),
+    ):
+        target = db.get(User, user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        changes = payload.model_dump(exclude_unset=True)
+        if not changes:
+            raise HTTPException(status_code=422, detail="At least one field must be supplied")
+        resulting_role = changes.get("role", target.role)
+        resulting_active = changes.get("is_active", target.is_active)
+        if target.id == actor.id and (resulting_role != "admin" or not resulting_active):
+            raise HTTPException(
+                status_code=409, detail="Administrators cannot remove their own access"
+            )
+        if (
+            target.is_active
+            and target.role == "admin"
+            and (resulting_role != "admin" or not resulting_active)
+        ):
+            active_admins = db.scalar(
+                select(func.count(User.id)).where(User.role == "admin", User.is_active.is_(True))
+            )
+            if active_admins <= 1:
+                raise HTTPException(status_code=409, detail="Cannot remove the last active admin")
+        old_role = target.role
+        old_active = target.is_active
+        target.role = resulting_role
+        target.is_active = resulting_active
+        audit(
+            db,
+            actor.id,
+            "user.update",
+            "user",
+            target.id,
+            {"before": {"role": old_role, "is_active": old_active}, "after": changes},
+        )
+        if old_role != target.role:
+            audit(
+                db,
+                actor.id,
+                "user.role_change",
+                "user",
+                target.id,
+                {"before": old_role, "after": target.role},
+            )
+        if old_active != target.is_active:
+            audit(
+                db,
+                actor.id,
+                "user.activation_change",
+                "user",
+                target.id,
+                {"before": old_active, "after": target.is_active},
+            )
+        db.commit()
+        db.refresh(target)
+        return target
 
     @app.post("/events", response_model=EventRead, status_code=201, tags=["events"])
     def ingest_event(
@@ -554,6 +776,7 @@ def create_app() -> FastAPI:
             source_ip=payload.source_ip,
             destination_ip=payload.destination_ip,
             domain=payload.domain,
+            url=payload.url,
             file_hash=payload.file_hash,
             details_json=json.dumps(payload.details, separators=(",", ":"), ensure_ascii=False),
             created_by_id=user.id,
@@ -566,11 +789,47 @@ def create_app() -> FastAPI:
         db.refresh(event)
         return serialize_event(event)
 
+    @app.post("/integrations/events", status_code=202, tags=["integrations"])
+    def ingest_event_batch(
+        payload: EventBatchCreate,
+        user: User = Depends(require_roles("admin", "analyst")),
+        db: Session = Depends(get_db),
+    ):
+        stored = []
+        for item in payload.events:
+            event = SecurityEvent(
+                event_type=item.event_type,
+                source=item.source,
+                occurred_at=item.occurred_at,
+                severity=item.severity,
+                source_ip=item.source_ip,
+                destination_ip=item.destination_ip,
+                domain=item.domain,
+                url=item.url,
+                file_hash=item.file_hash,
+                details_json=json.dumps(item.details, separators=(",", ":"), ensure_ascii=False),
+                created_by_id=user.id,
+            )
+            db.add(event)
+            db.flush()
+            maybe_alert_event(db, event)
+            audit(db, user.id, "event.ingest", "security_event", event.id)
+            stored.append(event)
+        db.commit()
+        for event in stored:
+            db.refresh(event)
+        return {"accepted_count": len(stored), "events": [serialize_event(item) for item in stored]}
+
     @app.get("/events", response_model=list[EventRead], tags=["events"])
     def list_events(
         event_type: str | None = None,
-        severity: str | None = Query(default=None),
+        severity: str | None = Query(default=None, pattern="^(low|medium|high|critical)$"),
+        source: str | None = Query(default=None, max_length=128),
         source_ip: str | None = None,
+        destination_ip: str | None = None,
+        domain: str | None = Query(default=None, max_length=253),
+        url: str | None = Query(default=None, max_length=2048),
+        file_hash: str | None = Query(default=None, max_length=128),
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int = Query(default=100, ge=1, le=500),
@@ -585,18 +844,39 @@ def create_app() -> FastAPI:
             filters.append(SecurityEvent.severity == severity)
         if source_ip:
             filters.append(SecurityEvent.source_ip == source_ip)
+        if destination_ip:
+            filters.append(SecurityEvent.destination_ip == destination_ip)
+        if source:
+            filters.append(SecurityEvent.source == source)
+        if domain:
+            filters.append(SecurityEvent.domain == domain.strip().rstrip(".").lower())
+        if url:
+            filters.append(SecurityEvent.url == url)
+        if file_hash:
+            filters.append(SecurityEvent.file_hash == file_hash.lower())
         if start:
             filters.append(SecurityEvent.occurred_at >= start)
         if end:
             filters.append(SecurityEvent.occurred_at <= end)
         events = db.scalars(
             select(SecurityEvent)
-            .where(and_(*filters))
+            .where(*filters)
             .order_by(SecurityEvent.occurred_at.desc(), SecurityEvent.id.desc())
             .limit(limit)
             .offset(offset)
         ).all()
         return [serialize_event(event) for event in events]
+
+    @app.get("/events/{event_id}", response_model=EventRead, tags=["events"])
+    def get_event(
+        event_id: int,
+        _user: User = Depends(require_roles("admin", "analyst", "viewer")),
+        db: Session = Depends(get_db),
+    ):
+        event = db.get(SecurityEvent, event_id)
+        if event is None:
+            raise HTTPException(status_code=404, detail="Event not found")
+        return serialize_event(event)
 
     @app.post(
         "/indicators", response_model=IndicatorRead, status_code=201, tags=["threat-intelligence"]
@@ -631,6 +911,78 @@ def create_app() -> FastAPI:
         db.refresh(indicator)
         return indicator
 
+    @app.post("/integrations/indicators", status_code=202, tags=["integrations"])
+    def ingest_indicator_batch(
+        payload: IndicatorBatchCreate,
+        user: User = Depends(require_roles("admin")),
+        db: Session = Depends(get_db),
+    ):
+        stored = []
+        skipped = 0
+        for item in payload.indicators:
+            for timestamp in (item.first_seen, item.expires_at):
+                if timestamp and (timestamp.tzinfo is None or timestamp.utcoffset() is None):
+                    raise HTTPException(
+                        status_code=422, detail="Indicator timestamps must include a timezone"
+                    )
+            if item.expires_at and item.first_seen and item.expires_at <= item.first_seen:
+                raise HTTPException(status_code=422, detail="expires_at must be after first_seen")
+            exists = db.scalar(
+                select(Indicator.id).where(
+                    Indicator.indicator_type == item.indicator_type,
+                    Indicator.value == item.value,
+                )
+            )
+            if exists is not None:
+                skipped += 1
+                continue
+            indicator = Indicator(**item.model_dump(), created_by_id=user.id)
+            db.add(indicator)
+            db.flush()
+            audit(db, user.id, "indicator.create", "indicator", indicator.id)
+            stored.append(indicator)
+        db.commit()
+        for indicator in stored:
+            db.refresh(indicator)
+        return {
+            "created_count": len(stored),
+            "skipped_existing_count": skipped,
+            "indicators": [
+                IndicatorRead.model_validate(item).model_dump(mode="json") for item in stored
+            ],
+        }
+
+    @app.get("/indicators/search", tags=["threat-intelligence"])
+    def search_indicators(
+        indicator_type: str = Query(pattern="^(ip|domain|url|hash)$"),
+        value: str = Query(min_length=1, max_length=2048),
+        _user: User = Depends(require_roles("admin", "analyst", "viewer")),
+        db: Session = Depends(get_db),
+    ):
+        try:
+            query_value = IndicatorCreate.model_validate(
+                {"indicator_type": indicator_type, "value": value, "source_name": "search"}
+            ).value
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from None
+        now = utcnow()
+        matches = db.scalars(
+            select(Indicator).where(
+                Indicator.indicator_type == indicator_type,
+                Indicator.value == query_value,
+                (Indicator.expires_at.is_(None)) | (Indicator.expires_at > now),
+            )
+        ).all()
+        return {
+            "indicator_type": indicator_type,
+            "query": query_value,
+            "found": bool(matches),
+            "count": len(matches),
+            "matches": [
+                IndicatorRead.model_validate(item).model_dump(mode="json") for item in matches
+            ],
+        }
+
     @app.get("/indicators", response_model=list[IndicatorRead], tags=["threat-intelligence"])
     def list_indicators(
         indicator_type: str | None = None,
@@ -648,7 +1000,7 @@ def create_app() -> FastAPI:
             filters.append((Indicator.expires_at.is_(None)) | (Indicator.expires_at > now))
         return db.scalars(
             select(Indicator)
-            .where(and_(*filters))
+            .where(*filters)
             .order_by(Indicator.created_at.desc())
             .limit(limit)
             .offset(offset)
@@ -684,10 +1036,31 @@ def create_app() -> FastAPI:
             assignee = db.get(User, changes["assigned_to_id"])
             if assignee is None or not assignee.is_active:
                 raise HTTPException(status_code=422, detail="Assignee must be an active user")
+        new_status = changes.get("status")
+        allowed = {
+            "new": {"investigating", "escalated", "closed"},
+            "investigating": {"new", "escalated", "closed"},
+            "escalated": {"investigating", "closed"},
+            "closed": set(),
+        }
+        if (
+            new_status is not None
+            and new_status != alert.status
+            and new_status not in allowed[alert.status]
+        ):
+            raise HTTPException(status_code=409, detail="Invalid alert status transition")
+        previous = {field: getattr(alert, field) for field in changes}
         for field, value in changes.items():
             setattr(alert, field, value)
         alert.updated_at = utcnow()
-        audit(db, user.id, "alert.update", "alert", alert.id)
+        audit(
+            db,
+            user.id,
+            "alert.update",
+            "alert",
+            alert.id,
+            {"before": previous, "after": changes},
+        )
         db.commit()
         db.refresh(alert)
         return alert
@@ -703,6 +1076,17 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Alert not found")
         event_data = serialize_event(alert.event) if alert.event else None
         indicator = db.get(Indicator, alert.indicator_id) if alert.indicator_id else None
+        evidence_events = [event_data] if event_data else []
+        for entry in db.scalars(
+            select(AuditLog).where(
+                AuditLog.action == "alert.evidence.add",
+                AuditLog.resource_type == "alert",
+                AuditLog.resource_id == str(alert.id),
+            )
+        ).all():
+            evidence_event = db.get(SecurityEvent, json.loads(entry.details_json).get("event_id"))
+            if evidence_event:
+                evidence_events.append(serialize_event(evidence_event))
         return {
             "id": alert.id,
             "title": alert.title,
@@ -711,6 +1095,7 @@ def create_app() -> FastAPI:
             "status": alert.status,
             "rule_id": alert.rule_id,
             "event": event_data,
+            "evidence_events": evidence_events,
             "indicator": IndicatorRead.model_validate(indicator) if indicator else None,
             "assigned_to_id": alert.assigned_to_id,
             "created_at": _ensure_aware(alert.created_at),
@@ -818,6 +1203,11 @@ def create_app() -> FastAPI:
             .where(IncidentNote.incident_id == incident_id)
             .order_by(IncidentNote.created_at, IncidentNote.id)
         ).all()
+        history = db.scalars(
+            select(AuditLog)
+            .where(AuditLog.resource_type == "incident", AuditLog.resource_id == str(incident_id))
+            .order_by(AuditLog.occurred_at, AuditLog.id)
+        ).all()
         return {
             **IncidentRead.model_validate(incident).model_dump(),
             "notes": [
@@ -830,6 +1220,15 @@ def create_app() -> FastAPI:
                     "created_at": _ensure_aware(note.created_at),
                 }
                 for note, username in notes
+            ],
+            "history": [
+                {
+                    "actor_id": entry.actor_id,
+                    "action": entry.action,
+                    "occurred_at": _ensure_aware(entry.occurred_at),
+                    "details": json.loads(entry.details_json),
+                }
+                for entry in history
             ],
         }
 
@@ -862,10 +1261,18 @@ def create_app() -> FastAPI:
             assignee = db.get(User, changes["assigned_to_id"])
             if assignee is None or not assignee.is_active:
                 raise HTTPException(status_code=422, detail="Assignee must be an active user")
+        previous = {field: getattr(incident, field) for field in changes}
         for field, value in changes.items():
             setattr(incident, field, value)
         incident.updated_at = utcnow()
-        audit(db, user.id, "incident.update", "incident", incident.id)
+        audit(
+            db,
+            user.id,
+            "incident.update",
+            "incident",
+            incident.id,
+            {"before": previous, "after": changes},
+        )
         db.commit()
         db.refresh(incident)
         return incident
@@ -901,13 +1308,33 @@ def create_app() -> FastAPI:
 
     @app.get("/audit", tags=["administration"])
     def list_audit(
+        actor_id: int | None = None,
+        action: str | None = Query(default=None, max_length=64),
+        resource_type: str | None = Query(default=None, max_length=64),
+        resource_id: str | None = Query(default=None, max_length=64),
+        start: datetime | None = None,
+        end: datetime | None = None,
         limit: int = Query(default=100, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
         _user: User = Depends(require_roles("admin")),
         db: Session = Depends(get_db),
     ):
+        filters = []
+        if actor_id is not None:
+            filters.append(AuditLog.actor_id == actor_id)
+        if action:
+            filters.append(AuditLog.action == action)
+        if resource_type:
+            filters.append(AuditLog.resource_type == resource_type)
+        if resource_id:
+            filters.append(AuditLog.resource_id == resource_id)
+        if start:
+            filters.append(AuditLog.occurred_at >= start)
+        if end:
+            filters.append(AuditLog.occurred_at <= end)
         entries = db.scalars(
             select(AuditLog)
+            .where(*filters)
             .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
             .limit(limit)
             .offset(offset)
@@ -920,6 +1347,37 @@ def create_app() -> FastAPI:
                 "resource_type": entry.resource_type,
                 "resource_id": entry.resource_id,
                 "occurred_at": _ensure_aware(entry.occurred_at),
+                "details": json.loads(entry.details_json),
+            }
+            for entry in entries
+        ]
+
+    @app.get("/operations/errors", tags=["operations"])
+    def list_operational_errors(
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        _user: User = Depends(require_roles("admin")),
+        db: Session = Depends(get_db),
+    ):
+        filters = [AuditLog.action.in_(("api.error", "api.validation_error"))]
+        if start:
+            filters.append(AuditLog.occurred_at >= start)
+        if end:
+            filters.append(AuditLog.occurred_at <= end)
+        entries = db.scalars(
+            select(AuditLog)
+            .where(*filters)
+            .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return [
+            {
+                "id": entry.id,
+                "occurred_at": _ensure_aware(entry.occurred_at),
+                "details": json.loads(entry.details_json),
             }
             for entry in entries
         ]
@@ -934,11 +1392,78 @@ def create_app() -> FastAPI:
             else "postgresql",
             "access_token_minutes": settings.access_token_minutes,
             "max_login_attempts": settings.max_login_attempts,
+            "password_min_length": settings.password_min_length,
             "login_lock_minutes": settings.login_lock_minutes,
             "brute_force_window_minutes": settings.brute_force_window_minutes,
             "brute_force_threshold": settings.brute_force_threshold,
+            "alert_dedupe_minutes": settings.alert_dedupe_minutes,
             "rate_limit_per_minute": settings.rate_limit_per_minute,
         }
+
+    @app.put("/system/config", tags=["administration"])
+    def update_safe_configuration(
+        payload: RuntimeConfigUpdate,
+        user: User = Depends(require_roles("admin")),
+        db: Session = Depends(get_db),
+    ):
+        changes = payload.model_dump(exclude_unset=True)
+        if not changes:
+            raise HTTPException(status_code=422, detail="At least one setting must be supplied")
+        before = {key: getattr(settings, key) for key in changes}
+        for key, value in changes.items():
+            row = db.get(RuntimeSetting, key)
+            if row is None:
+                db.add(RuntimeSetting(key=key, value=str(value), updated_by_id=user.id))
+            else:
+                row.value = str(value)
+                row.updated_by_id = user.id
+                row.updated_at = utcnow()
+            setattr(settings, key, value)
+        rate_limiter.limit = settings.rate_limit_per_minute
+        audit(
+            db,
+            user.id,
+            "system.config.update",
+            "system_config",
+            "runtime",
+            {
+                "before": before,
+                "after": changes,
+            },
+        )
+        db.commit()
+        return read_safe_configuration(user)
+
+    @app.delete("/system/config/{key}", tags=["administration"])
+    def reset_safe_configuration(
+        key: str,
+        user: User = Depends(require_roles("admin")),
+        db: Session = Depends(get_db),
+    ):
+        if key not in RUNTIME_CONFIG_FIELDS:
+            raise HTTPException(status_code=404, detail="Runtime setting not found")
+        row = db.get(RuntimeSetting, key)
+        if row is None:
+            return read_safe_configuration(user)
+        previous = getattr(settings, key)
+        db.delete(row)
+        restored = DEFAULT_RUNTIME_CONFIG[key]
+        setattr(settings, key, restored)
+        if key == "rate_limit_per_minute":
+            rate_limiter.limit = restored
+        audit(
+            db,
+            user.id,
+            "system.config.reset",
+            "system_config",
+            key,
+            {
+                "before": previous,
+                "after": restored,
+            },
+        )
+        db.commit()
+        return read_safe_configuration(user)
 
     @app.get("/maintenance/backups", tags=["maintenance"])
     def list_backups(_user: User = Depends(require_roles("admin"))):
@@ -997,27 +1522,49 @@ def create_app() -> FastAPI:
     @app.get("/reports/summary", tags=["reports"])
     def report_summary(
         days: int = Query(default=30, ge=1, le=365),
+        start: datetime | None = None,
+        end: datetime | None = None,
         _user: User = Depends(require_roles("admin", "analyst", "viewer")),
         db: Session = Depends(get_db),
     ):
-        since = utcnow() - timedelta(days=days)
+        generated_at = utcnow()
+        since = _ensure_aware(start) if start else generated_at - timedelta(days=days)
+        until = _ensure_aware(end) if end else generated_at
+        if since > until:
+            raise HTTPException(status_code=422, detail="start must be before or equal to end")
         events = (
             db.scalar(
-                select(func.count(SecurityEvent.id)).where(SecurityEvent.received_at >= since)
+                select(func.count(SecurityEvent.id)).where(
+                    SecurityEvent.received_at >= since, SecurityEvent.received_at <= until
+                )
             )
             or 0
         )
-        alerts = db.scalar(select(func.count(Alert.id)).where(Alert.created_at >= since)) or 0
+        alerts = (
+            db.scalar(
+                select(func.count(Alert.id)).where(
+                    Alert.created_at >= since, Alert.created_at <= until
+                )
+            )
+            or 0
+        )
         incidents = (
-            db.scalar(select(func.count(Incident.id)).where(Incident.created_at >= since)) or 0
+            db.scalar(
+                select(func.count(Incident.id)).where(
+                    Incident.created_at >= since, Incident.created_at <= until
+                )
+            )
+            or 0
         )
         severity_counts = db.execute(
             select(Alert.severity, func.count(Alert.id))
-            .where(Alert.created_at >= since)
+            .where(Alert.created_at >= since, Alert.created_at <= until)
             .group_by(Alert.severity)
         ).all()
         return {
             "period_days": days,
+            "generated_at": generated_at,
+            "filters_applied": {"start": since, "end": until},
             "events_received": events,
             "alerts_created": alerts,
             "incidents_created": incidents,
@@ -1029,17 +1576,75 @@ def create_app() -> FastAPI:
         dataset: str = Query(pattern="^(events|alerts|incidents)$"),
         format: str = Query(default="csv", pattern="^(csv|json)$"),
         limit: int = Query(default=1000, ge=1, le=5000),
-        _user: User = Depends(require_roles("admin", "analyst", "viewer")),
+        start: datetime | None = None,
+        end: datetime | None = None,
+        severity: str | None = Query(default=None, pattern="^(low|medium|high|critical)$"),
+        status: str | None = Query(default=None, max_length=16),
+        event_type: str | None = Query(default=None, max_length=64),
+        source_ip: str | None = Query(default=None, max_length=45),
+        user: User = Depends(require_roles("admin", "analyst", "viewer")),
         db: Session = Depends(get_db),
     ):
+        generated_at = utcnow()
+        since = _ensure_aware(start) if start else None
+        until = _ensure_aware(end) if end else generated_at
+        if since and since > until:
+            raise HTTPException(status_code=422, detail="start must be before or equal to end")
+        if dataset == "alerts" and status not in {
+            None,
+            "new",
+            "investigating",
+            "escalated",
+            "closed",
+        }:
+            raise HTTPException(status_code=422, detail="Invalid alert status")
+        if dataset == "incidents" and status not in {
+            None,
+            "open",
+            "investigating",
+            "contained",
+            "resolved",
+            "closed",
+        }:
+            raise HTTPException(status_code=422, detail="Invalid incident status")
+        applied_filters = {
+            "dataset": dataset,
+            "start": since,
+            "end": until,
+            "severity": severity,
+            "status": status,
+            "event_type": event_type,
+            "source_ip": source_ip,
+        }
+        audit(db, user.id, "report.export", "report", dataset, applied_filters)
+        db.commit()
         if dataset == "events":
+            filters = [SecurityEvent.received_at <= until]
+            if since:
+                filters.append(SecurityEvent.received_at >= since)
+            if severity:
+                filters.append(SecurityEvent.severity == severity)
+            if event_type:
+                filters.append(SecurityEvent.event_type == event_type)
+            if source_ip:
+                filters.append(SecurityEvent.source_ip == source_ip)
             items = [
                 serialize_event(item)
                 for item in db.scalars(
-                    select(SecurityEvent).order_by(SecurityEvent.id.desc()).limit(limit)
+                    select(SecurityEvent)
+                    .where(*filters)
+                    .order_by(SecurityEvent.id.desc())
+                    .limit(limit)
                 ).all()
             ]
         elif dataset == "alerts":
+            filters = [Alert.created_at <= until]
+            if since:
+                filters.append(Alert.created_at >= since)
+            if severity:
+                filters.append(Alert.severity == severity)
+            if status:
+                filters.append(Alert.status == status)
             items = [
                 {
                     "id": item.id,
@@ -1052,9 +1657,18 @@ def create_app() -> FastAPI:
                     "indicator_id": item.indicator_id,
                     "created_at": _ensure_aware(item.created_at),
                 }
-                for item in db.scalars(select(Alert).order_by(Alert.id.desc()).limit(limit)).all()
+                for item in db.scalars(
+                    select(Alert).where(*filters).order_by(Alert.id.desc()).limit(limit)
+                ).all()
             ]
         else:
+            filters = [Incident.created_at <= until]
+            if since:
+                filters.append(Incident.created_at >= since)
+            if severity:
+                filters.append(Incident.severity == severity)
+            if status:
+                filters.append(Incident.status == status)
             items = [
                 {
                     "id": item.id,
@@ -1067,7 +1681,7 @@ def create_app() -> FastAPI:
                     "created_at": _ensure_aware(item.created_at),
                 }
                 for item in db.scalars(
-                    select(Incident).order_by(Incident.id.desc()).limit(limit)
+                    select(Incident).where(*filters).order_by(Incident.id.desc()).limit(limit)
                 ).all()
             ]
         normalized = [
@@ -1078,7 +1692,13 @@ def create_app() -> FastAPI:
             for item in items
         ]
         if format == "json":
-            return normalized
+            return JSONResponse(
+                normalized,
+                headers={
+                    "X-Report-Generated-At": generated_at.isoformat(),
+                    "X-Report-Filters": json.dumps(applied_filters, default=str),
+                },
+            )
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=list(normalized[0]) if normalized else ["id"])
         writer.writeheader()
@@ -1098,33 +1718,66 @@ def create_app() -> FastAPI:
         return StreamingResponse(
             iter([output.getvalue()]),
             media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": f"attachment; filename=guardian-{dataset}.csv"},
+            headers={
+                "Content-Disposition": f"attachment; filename=guardian-{dataset}.csv",
+                "X-Report-Generated-At": generated_at.isoformat(),
+                "X-Report-Filters": json.dumps(applied_filters, default=str),
+            },
         )
 
     @app.get("/analytics/summary", tags=["analytics"])
     def analytics_summary(
+        hours: int = Query(default=24, ge=1, le=720),
         _user: User = Depends(require_roles("admin", "analyst", "viewer")),
         db: Session = Depends(get_db),
     ):
-        since = utcnow() - timedelta(hours=24)
+        generated_at = utcnow()
+        since = generated_at - timedelta(hours=hours)
         event_count = (
             db.scalar(
-                select(func.count(SecurityEvent.id)).where(SecurityEvent.received_at >= since)
+                select(func.count(SecurityEvent.id)).where(
+                    SecurityEvent.received_at >= since,
+                    SecurityEvent.received_at <= generated_at,
+                )
             )
             or 0
         )
         active_alert_count = (
-            db.scalar(select(func.count(Alert.id)).where(Alert.status != "closed")) or 0
+            db.scalar(
+                select(func.count(Alert.id)).where(
+                    Alert.status != "closed",
+                    Alert.created_at >= since,
+                    Alert.created_at <= generated_at,
+                )
+            )
+            or 0
         )
         by_severity = db.execute(
             select(Alert.severity, func.count(Alert.id))
-            .where(Alert.status != "closed")
+            .where(
+                Alert.status != "closed",
+                Alert.created_at >= since,
+                Alert.created_at <= generated_at,
+            )
             .group_by(Alert.severity)
         ).all()
+        incident_count = (
+            db.scalar(
+                select(func.count(Incident.id)).where(
+                    Incident.status.not_in(("resolved", "closed")),
+                    Incident.created_at >= since,
+                    Incident.created_at <= generated_at,
+                )
+            )
+            or 0
+        )
         return {
-            "window_hours": 24,
+            "window_hours": hours,
+            "generated_at": generated_at,
+            "period_start": since,
             "events_received": event_count,
             "active_alerts": active_alert_count,
+            "active_incidents": incident_count,
             "active_alerts_by_severity": {severity: count for severity, count in by_severity},
             "rate_limit_denials_since_process_start": rate_limiter.denials,
         }

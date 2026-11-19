@@ -13,13 +13,16 @@ Prototipo académico de una API XDR ligera para registrar telemetría de segurid
 - JWT de acceso con expiración, emisor, identificador revocable y logout efectivo.
 - Bloqueo temporal por intentos fallidos y mensajes de autenticación genéricos.
 - Alta, desactivación y consulta de usuarios por administradores.
+- Cambio de rol/activación con protección contra dejar el sistema sin administrador.
 - Ingestión validada de eventos; normaliza IP, dominio, hash y hora UTC.
-- Consulta paginada de eventos con filtros por tipo, severidad, IP y rango temporal.
-- Indicadores IP, dominio y hash con fuente, confianza y fecha de expiración. No se incluye una lista inventada de IoC ni se afirma que el prototipo consuma feeds externos.
+- Consulta de eventos por ID, paginación y filtros combinables por tipo, severidad, fuente, IP, dominio, URL, hash y fecha.
+- Ingestión por lotes de eventos e IoC normalizados para conectores externos; deduplica IoC repetidos.
+- Indicadores IP, dominio, URL y hash con fuente, confianza y fecha de expiración, con búsqueda exacta.
 - Correlación exacta contra IoC y alerta por repetición de fallos de autenticación.
-- Reglas configurables de detección exacta/contiene por administradores.
+- Reglas configurables de detección exacta/contiene por administradores; evidencia repetida se agrupa con ventana configurable.
 - Gestión de alertas e incidentes, transiciones de estado, asignación y notas de investigación.
-- Resumen de actividad, exportación CSV/JSON de reportes y consulta administrativa de auditoría.
+- Historial de cambios en alertas/incidentes, resumen de actividad por periodo, reportes filtrados y exportación CSV/JSON.
+- Configuración operativa modificable por administrador, persistida y auditada; errores operativos consultables por administradores.
 - Límite de solicitudes por IP para instancia única; denegaciones producen evento/auditoría y una alerta agregada con enfriamiento de cinco minutos.
 - Copia SQLite con verificación y restauración offline que exige confirmación explícita.
 
@@ -49,13 +52,13 @@ Todas las rutas salvo `GET /health` y `POST /auth/login` requieren `Authorizatio
 | Ruta | Acceso | Uso |
 |---|---|---|
 | `POST /auth/login`, `POST /auth/logout` | Público / usuario autenticado | Iniciar y revocar sesión |
-| `GET/POST /users`, `DELETE /users/{id}` | Admin | Administrar cuentas |
-| `POST /events`, `GET /events` | Admin, analyst / usuarios autenticados | Ingerir y consultar telemetría |
-| `GET/POST /indicators` | Consulta autenticada / admin | Mantener inteligencia de amenazas con procedencia |
+| `GET/POST /users`, `PATCH/DELETE /users/{id}` | Admin | Administrar cuentas y roles |
+| `POST /events`, `POST /integrations/events`, `GET /events`, `GET /events/{id}` | Admin, analyst / usuarios autenticados | Ingesta individual y por lotes; consulta y filtros |
+| `GET/POST /indicators`, `GET /indicators/search`, `POST /integrations/indicators` | Consulta autenticada / admin | Mantener, importar por lotes y buscar IoC con procedencia |
 | `GET /alerts`, `PATCH /alerts/{id}` | Consulta autenticada / admin, analyst | Revisar, asignar y actualizar alertas |
 | `GET /analytics/summary` | Usuario autenticado | Métricas de las últimas 24 horas |
-| `/rules`, `/incidents`, `/incidents/{id}/notes` | Admin / admin, analyst | Reglas, seguimiento y bitácora de investigación |
-| `GET /audit`, `GET /system/config` | Admin | Auditoría y configuración sin secretos |
+| `/rules`, `/incidents`, `/incidents/{id}/notes` | Admin / admin, analyst | Reglas, seguimiento e historial de investigación |
+| `GET /audit`, `GET/PUT /system/config`, `DELETE /system/config/{key}`, `GET /operations/errors` | Admin | Auditoría, configuración sin secretos y errores operativos |
 | `GET /reports/summary`, `GET /reports/export` | Usuario autenticado | Resumen y exportación CSV/JSON limitada |
 | `GET/POST /maintenance/backups` | Admin | Listar o descargar una copia de SQLite |
 
@@ -83,7 +86,7 @@ pytest
 ruff check src tests scripts
 ```
 
-Las pruebas cubren autenticación, roles, revocación, validación, ingestión, filtros y alertas por IoC y fuerza bruta. SQLite local permite empezar sin servicios externos.
+Las pruebas cubren autenticación, roles, revocación, validación, lotes, filtros, límites, configuración, auditoría, reportes, incidentes y correlación de IoC. SQLite local permite empezar sin servicios externos.
 
 Para restaurar una copia local, detén la API, comprueba el archivo y el destino, y confirma el reemplazo:
 
@@ -91,13 +94,14 @@ Para restaurar una copia local, detén la API, comprueba el archivo y el destino
 guardian-restore-sqlite .\backups\guardian-<id>.sqlite3 .\guardian_caribe.db --confirm-replace
 ```
 
-Restaura copias de la misma versión del esquema; el prototipo todavía no tiene migraciones.
+Restaura copias del esquema compatible; el procedimiento añade una entrada `maintenance.restore` al registro de auditoría de la base restaurada. El servicio tiene migraciones de compatibilidad de esquema versionadas de inicio para columnas recientes; revisa y amplía esa ruta antes de desplegar una actualización.
 
 ## Seguridad y límites conocidos
 
 - El limitador y el bloqueo residen en memoria/base local; se reinician con el proceso y no coordinan varias instancias. Para despliegue se requiere almacenamiento compartido (Redis) y límites en proxy.
 - La expiración JWT no sustituye TLS; no publiques el servicio directamente a Internet.
 - El prototipo no trae conectores de agentes/EDR, feeds comerciales, aislamiento de endpoints, respuesta automatizada, MFA ni una interfaz web.
+- Los endpoints de integración reciben datos normalizados; todavía no consultan APIs de proveedores por su cuenta. Hace falta elegir feeds/EDR concretos, acordar sus esquemas y configurar credenciales como secretos del entorno.
 - Las reglas de detección son deliberadamente pequeñas y explícitas. Requieren ajuste con datos autorizados para reducir falsos positivos.
 - La copia API solo funciona con SQLite en archivo local y descarga datos del sistema, incluidos hashes de contraseñas y telemetría. Limita quién puede acceder a ella; en Linux la API crea el directorio con modo `0700` y las copias con `0600`. Para restaurar, detén el servicio y usa el comando local con la ruta de destino comprobada y `--confirm-replace`.
 - Antes de producción hacen falta migraciones versionadas, PostgreSQL, gestión de secretos, TLS, protección CSRF si se añade sesión de navegador, política de retención, revisión de privacidad, copias cifradas y ejercicios de restauración.
@@ -113,3 +117,5 @@ El catálogo de [35 requerimientos](documentacion/requerimientos.md) describe el
 - [Issues](https://github.com/Ramon-MY/GUARDIAN-CARIBE-V1/issues)
 - [PR de mockups #37](https://github.com/Ramon-MY/GUARDIAN-CARIBE-V1/pull/37)
 - [Catálogo de requerimientos](documentacion/requerimientos.md)
+- [Matriz de cobertura RF y guía de API](documentacion/api-y-matriz-rf.md)
+- [Arquitectura y seguridad](documentacion/arquitectura-y-seguridad.md)

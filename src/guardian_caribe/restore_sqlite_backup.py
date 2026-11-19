@@ -1,12 +1,14 @@
 """Restore a verified local SQLite backup after stopping the API process."""
 
 import argparse
+import json
 import os
 import sqlite3
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
-REQUIRED_TABLES = {"users", "security_events", "alerts", "indicators"}
+REQUIRED_TABLES = {"users", "security_events", "alerts", "indicators", "audit_logs"}
 
 
 def verify_database(path: Path) -> None:
@@ -24,6 +26,36 @@ def verify_database(path: Path) -> None:
     missing = REQUIRED_TABLES - tables
     if missing:
         raise ValueError(f"Backup is missing expected GUARDIÁN CARIBE tables: {sorted(missing)}")
+
+
+def record_restore(path: Path, backup: Path, destination: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_logs)")}
+        required = {"actor_id", "action", "resource_type", "resource_id", "occurred_at"}
+        if not required.issubset(columns):
+            raise ValueError("Backup audit log schema is unsupported; restore was not applied")
+        fields = ["actor_id", "action", "resource_type", "resource_id", "occurred_at"]
+        values = [
+            None,
+            "maintenance.restore",
+            "database",
+            destination.name[:64],
+            datetime.now(UTC).isoformat(),
+        ]
+        if "details_json" in columns:
+            fields.append("details_json")
+            values.append(
+                json.dumps({"backup_name": backup.name, "offline": True}, separators=(",", ":"))
+            )
+        placeholders = ", ".join("?" for _ in fields)
+        column_list = ", ".join(fields)
+        connection.execute(
+            f"INSERT INTO audit_logs ({column_list}) VALUES ({placeholders})", values
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def restore(backup: Path, destination: Path, confirmed: bool) -> None:
@@ -57,6 +89,7 @@ def restore(backup: Path, destination: Path, confirmed: bool) -> None:
             target.close()
             source.close()
         verify_database(temporary)
+        record_restore(temporary, backup, destination)
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)

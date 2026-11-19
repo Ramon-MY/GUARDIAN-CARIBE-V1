@@ -10,6 +10,10 @@ def create_database(path, value: str) -> None:
     try:
         for table in ("users", "security_events", "alerts", "indicators"):
             connection.execute(f"CREATE TABLE {table} (value TEXT)")
+        connection.execute(
+            "CREATE TABLE audit_logs (id INTEGER PRIMARY KEY, actor_id INTEGER, action TEXT, "
+            "resource_type TEXT, resource_id TEXT, occurred_at TEXT, details_json TEXT)"
+        )
         connection.execute("INSERT INTO users(value) VALUES (?)", (value,))
         connection.commit()
     finally:
@@ -28,7 +32,11 @@ def test_restore_requires_confirmation_and_replaces_atomically(tmp_path):
     restore(backup, destination, confirmed=True)
     with sqlite3.connect(destination) as connection:
         restored = connection.execute("SELECT value FROM users").fetchone()[0]
+        action = connection.execute(
+            "SELECT action FROM audit_logs ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
     assert restored == "backup-state"
+    assert action == "maintenance.restore"
 
 
 def test_restore_rejects_database_missing_project_tables(tmp_path):

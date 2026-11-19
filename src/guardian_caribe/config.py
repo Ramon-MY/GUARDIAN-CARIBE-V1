@@ -16,8 +16,10 @@ class Settings(BaseSettings):
     access_token_minutes: int = Field(default=30, ge=5, le=1440)
     max_login_attempts: int = Field(default=5, ge=3, le=20)
     login_lock_minutes: int = Field(default=15, ge=1, le=1440)
+    password_min_length: int = Field(default=12, ge=12, le=128)
     brute_force_window_minutes: int = Field(default=10, ge=1, le=1440)
     brute_force_threshold: int = Field(default=5, ge=3, le=100)
+    alert_dedupe_minutes: int = Field(default=5, ge=1, le=1440)
     rate_limit_per_minute: int = Field(default=120, ge=10, le=10000)
     bootstrap_admin_username: str | None = None
     bootstrap_admin_password: SecretStr | None = None
@@ -32,7 +34,7 @@ class Settings(BaseSettings):
             else None
         )
         if bootstrap_password and (
-            len(bootstrap_password) < 12
+            len(bootstrap_password) < self.password_min_length
             or bootstrap_password.lower().startswith(("replace-with", "change-me"))
         ):
             raise ValueError(

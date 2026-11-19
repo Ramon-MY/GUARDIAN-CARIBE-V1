@@ -43,6 +43,7 @@ class SecurityEvent(Base):
     source_ip: Mapped[str | None] = mapped_column(String(45), nullable=True, index=True)
     destination_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
     domain: Mapped[str | None] = mapped_column(String(253), nullable=True, index=True)
+    url: Mapped[str | None] = mapped_column(String(2048), nullable=True, index=True)
     file_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     details_json: Mapped[str] = mapped_column(Text, default="{}")
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
@@ -54,7 +55,7 @@ class Indicator(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     indicator_type: Mapped[str] = mapped_column(String(16))
-    value: Mapped[str] = mapped_column(String(253))
+    value: Mapped[str] = mapped_column(String(2048))
     source_name: Mapped[str] = mapped_column(String(128))
     source_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     confidence: Mapped[int] = mapped_column(Integer, default=50)
@@ -143,3 +144,13 @@ class AuditLog(Base):
     resource_type: Mapped[str] = mapped_column(String(64))
     resource_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    details_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class RuntimeSetting(Base):
+    __tablename__ = "runtime_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(32))
+    updated_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
